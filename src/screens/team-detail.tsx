@@ -26,6 +26,7 @@ interface TeamMemberDraft {
   tool: string;
   role: string;
   model?: string;
+  draftId: string;
 }
 
 interface TeamPlanVote {
@@ -78,6 +79,13 @@ const PLAN_MAX_ITERATION_OPTIONS = [
 
 type TabId = 'board' | 'plan' | 'chat';
 
+let memberDraftIdCounter = 0;
+
+function createMemberDraftId(): string {
+  memberDraftIdCounter += 1;
+  return `member-${Date.now().toString(36)}-${memberDraftIdCounter}`;
+}
+
 export function TeamDetailRoute() {
   const [params] = useSearchParams();
   const teamId = params.get('id') ?? '';
@@ -124,6 +132,7 @@ export function TeamDetailRoute() {
             tool: member.tool,
             role: member.role,
             model: member.model,
+            draftId: createMemberDraftId(),
           })));
         }
       }
@@ -241,7 +250,7 @@ export function TeamDetailRoute() {
   };
 
   const addTeamMember = () => {
-    setTeamMemberDrafts((current) => [...current, { name: '', tool: 'codex', role: 'coder' }]);
+    setTeamMemberDrafts((current) => [...current, { name: '', tool: 'codex', role: 'coder', draftId: createMemberDraftId() }]);
   };
 
   const updateTeamMember = (index: number, field: keyof TeamMemberDraft, value: string) => {
@@ -265,7 +274,12 @@ export function TeamDetailRoute() {
         teamId,
         name: teamName.trim(),
         cwd: teamCwd.trim(),
-        members: members.map((member) => ({ ...member, model: member.model?.trim() || undefined })),
+        members: members.map((member) => ({
+          name: member.name,
+          tool: member.tool,
+          role: member.role,
+          model: member.model?.trim() || undefined,
+        })),
       });
       if (res.ok) {
         setShowTeamForm(false);
@@ -325,7 +339,7 @@ export function TeamDetailRoute() {
           </div>
           <div className="mt-3 flex flex-wrap gap-1.5">
             {teamMemberDrafts.map((member) => (
-              <Badge key={`${member.name}-${member.role}`} variant="neutral">
+              <Badge key={member.draftId} variant="neutral">
                 {member.name} · {member.role}
               </Badge>
             ))}
@@ -468,7 +482,7 @@ export function TeamDetailRoute() {
                     </Button>
                   </div>
                   {teamMemberDrafts.map((member, index) => (
-                    <div key={`${index}-${member.name}`} className="bg-surface-light rounded-[6px] p-2.5 flex flex-col gap-2">
+                    <div key={member.draftId} className="bg-surface-light rounded-[6px] p-2.5 flex flex-col gap-2">
                       <div className="flex gap-1.5 items-end">
                         <div className="flex-1 flex flex-col gap-0.5">
                           <span className="text-[11px] tracking-[-0.11px] text-text-dim font-normal">Name</span>

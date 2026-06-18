@@ -16,6 +16,7 @@ interface TeamMember {
   tool: string;
   role: string;
   model?: string;
+  draftId?: string;
 }
 
 interface TeamInfo {
@@ -28,12 +29,29 @@ interface TeamInfo {
   tasksTotal?: number;
 }
 
+let memberDraftIdCounter = 0;
+
+function createMemberDraftId(): string {
+  memberDraftIdCounter += 1;
+  return `member-${Date.now().toString(36)}-${memberDraftIdCounter}`;
+}
+
+function ensureMemberDraftIds(members: TeamMember[]): TeamMember[] {
+  let changed = false;
+  const nextMembers = members.map((member) => {
+    if (member.draftId) return member;
+    changed = true;
+    return { ...member, draftId: createMemberDraftId() };
+  });
+  return changed ? nextMembers : members;
+}
+
 const EMPTY_TEAM_DRAFT = {
   teamName: '',
   teamCwd: '',
   hostId: '',
   members: [
-    { name: '', tool: 'claude', role: 'lead' },
+    { name: '', tool: 'claude', role: 'lead', draftId: createMemberDraftId() },
   ] as TeamMember[],
 };
 
@@ -71,6 +89,13 @@ export function TeamsRoute() {
     }
   }, [activeHostId, draft.hostId, hosts, setDraft, showForm]);
 
+  useEffect(() => {
+    setDraft((current) => {
+      const nextMembers = ensureMemberDraftIds(current.members);
+      return nextMembers === current.members ? current : { ...current, members: nextMembers };
+    });
+  }, [setDraft]);
+
   const refresh = async () => {
     try {
       const res = await rpc('team.list');
@@ -95,7 +120,7 @@ export function TeamsRoute() {
   const addMember = () => {
     setDraft((current) => ({
       ...current,
-      members: [...current.members, { name: '', tool: 'claude', role: 'coder' }],
+      members: [...current.members, { name: '', tool: 'claude', role: 'coder', draftId: createMemberDraftId() }],
     }));
   };
 
@@ -217,7 +242,7 @@ export function TeamsRoute() {
               </div>
 
               {members.map((member, i) => (
-                <div key={i} className="bg-surface-light rounded-[6px] p-2.5 flex flex-col gap-2">
+                <div key={member.draftId ?? i} className="bg-surface-light rounded-[6px] p-2.5 flex flex-col gap-2">
                   {/* Row 1: Name (full width) */}
                   <div className="flex gap-1.5 items-end">
                     <div className="flex-1 flex flex-col gap-0.5">

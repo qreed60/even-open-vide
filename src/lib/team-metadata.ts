@@ -2,6 +2,7 @@ export interface TeamProviderCapability {
   value: string;
   label: string;
   status: 'available' | 'unavailable' | 'planned' | 'disabled';
+  hint?: string;
   supportsModelOverride?: boolean;
   supportsVision?: boolean;
   supportsLongRunning?: boolean;
@@ -29,6 +30,8 @@ const DEFAULT_PROVIDERS: TeamProviderCapability[] = [
   { value: 'claude', label: 'Claude', status: 'available', supportsModelOverride: true, supportsLongRunning: true },
   { value: 'codex', label: 'Codex', status: 'available', supportsModelOverride: true, supportsLongRunning: true },
   { value: 'gemini', label: 'Gemini', status: 'available', supportsModelOverride: true, supportsVision: true },
+  { value: 'opencode', label: 'OpenCode', status: 'unavailable', hint: 'enable daemon flag', supportsModelOverride: true, supportsLongRunning: true },
+  { value: 'openhands', label: 'OpenHands', status: 'planned', hint: 'planned' },
 ];
 
 function titleize(value: string): string {
@@ -41,6 +44,13 @@ function normalizeStatus(value: unknown): TeamProviderCapability['status'] {
   if (value === 'planned' || value === 'disabled' || value === 'unavailable') return value;
   if (value === false) return 'unavailable';
   return 'available';
+}
+
+function booleanField(...values: unknown[]): boolean | undefined {
+  for (const value of values) {
+    if (typeof value === 'boolean') return value;
+  }
+  return undefined;
 }
 
 function metadataRecord(metadata: unknown): Record<string, unknown> {
@@ -79,17 +89,24 @@ export function providerOptionsFromMetadata(metadata: unknown): TeamProviderCapa
   if (Array.isArray(rawProviders)) {
     for (const provider of rawProviders) {
       if (typeof provider === 'string') {
-        providers.push({ value: provider, label: titleize(provider), status: 'available' });
+        const value = provider.toLowerCase();
+        providers.push({ value, label: titleize(value), status: value === 'opencode' ? 'disabled' : value === 'openhands' ? 'planned' : 'available' });
         continue;
       }
       if (!provider || typeof provider !== 'object') continue;
       const item = provider as Record<string, unknown>;
       const value = typeof item.value === 'string' ? item.value : typeof item.id === 'string' ? item.id : typeof item.name === 'string' ? item.name : '';
       if (!value) continue;
+      const normalizedValue = value.toLowerCase();
+      const executable = booleanField(item.executable, item.canExecute, item.executionEnabled);
+      const enabled = booleanField(item.enabled, item.available);
+      const installed = booleanField(item.installed, item.detected, item.present);
+      const baseStatus = normalizeStatus(item.status ?? item.available);
       providers.push({
-        value,
-        label: typeof item.label === 'string' ? item.label : titleize(value),
-        status: normalizeStatus(item.status ?? item.available),
+        value: normalizedValue,
+        label: typeof item.label === 'string' ? item.label : titleize(normalizedValue),
+        status: normalizeProviderStatus(normalizedValue, baseStatus, executable, enabled),
+        hint: providerHint(normalizedValue, baseStatus, executable, enabled, installed),
         supportsModelOverride: Boolean(item.supportsModelOverride ?? item.modelOverride),
         supportsVision: Boolean(item.supportsVision ?? item.vision),
         supportsLongRunning: Boolean(item.supportsLongRunning ?? item.supportsStatusPolling ?? item.statusPolling),
@@ -98,10 +115,16 @@ export function providerOptionsFromMetadata(metadata: unknown): TeamProviderCapa
   } else if (rawProviders && typeof rawProviders === 'object') {
     for (const [value, provider] of Object.entries(rawProviders as Record<string, unknown>)) {
       const item = provider && typeof provider === 'object' ? provider as Record<string, unknown> : {};
+      const normalizedValue = value.toLowerCase();
+      const executable = booleanField(item.executable, item.canExecute, item.executionEnabled);
+      const enabled = booleanField(item.enabled, item.available, typeof provider === 'boolean' ? provider : undefined);
+      const installed = booleanField(item.installed, item.detected, item.present, typeof provider === 'boolean' ? provider : undefined);
+      const baseStatus = normalizeStatus(item.status ?? item.available ?? provider);
       providers.push({
-        value,
-        label: typeof item.label === 'string' ? item.label : titleize(value),
-        status: normalizeStatus(item.status ?? item.available ?? provider),
+        value: normalizedValue,
+        label: typeof item.label === 'string' ? item.label : titleize(normalizedValue),
+        status: normalizeProviderStatus(normalizedValue, baseStatus, executable, enabled),
+        hint: providerHint(normalizedValue, baseStatus, executable, enabled, installed),
         supportsModelOverride: Boolean(item.supportsModelOverride ?? item.modelOverride),
         supportsVision: Boolean(item.supportsVision ?? item.vision),
         supportsLongRunning: Boolean(item.supportsLongRunning ?? item.supportsStatusPolling ?? item.statusPolling),
@@ -113,11 +136,13 @@ export function providerOptionsFromMetadata(metadata: unknown): TeamProviderCapa
   const byValue = new Map<string, TeamProviderCapability>();
   for (const provider of (hasMetadata ? providers : DEFAULT_PROVIDERS)) {
     const value = provider.value.toLowerCase();
-    if ((value === 'opencode' || value === 'openhands') && provider.status === 'available') {
-      byValue.set(value, { ...provider, value, status: 'planned' });
-    } else {
-      byValue.set(value, { ...provider, value });
-    }
+    byValue.set(value, {
+      ...provider,
+      value,
+      label: value === 'opencode' ? 'OpenCode' : value === 'openhands' ? 'OpenHands' : provider.label,
+      status: value === 'openhands' ? 'planned' : provider.status,
+      hint: value === 'openhands' ? 'planned' : provider.hint,
+    });
   }
 
   for (const fallback of DEFAULT_PROVIDERS) {
@@ -128,8 +153,42 @@ export function providerOptionsFromMetadata(metadata: unknown): TeamProviderCapa
 
   return Array.from(byValue.values()).map((provider) => ({
     ...provider,
-    label: provider.status === 'available' ? provider.label : `${provider.label} (${provider.status})`,
+    label: providerLabel(provider),
   }));
+}
+
+function normalizeProviderStatus(
+  value: string,
+  baseStatus: TeamProviderCapability['status'],
+  executable: boolean | undefined,
+  enabled: boolean | undefined,
+): TeamProviderCapability['status'] {
+  if (value === 'openhands') return 'planned';
+  if (value !== 'opencode') return baseStatus;
+  if (baseStatus === 'disabled' || enabled === false || executable === false) return 'disabled';
+  if (baseStatus === 'planned' || baseStatus === 'unavailable') return baseStatus;
+  return enabled === true && executable === true ? 'available' : 'disabled';
+}
+
+function providerHint(
+  value: string,
+  baseStatus: TeamProviderCapability['status'],
+  executable: boolean | undefined,
+  enabled: boolean | undefined,
+  installed: boolean | undefined,
+): string | undefined {
+  if (value === 'openhands') return 'planned';
+  if (value !== 'opencode') return undefined;
+  if (enabled === true && executable === true) return 'enabled';
+  if (installed === true || enabled === false || executable === false) return 'installed, disabled';
+  if (baseStatus === 'unavailable') return 'unavailable';
+  return 'enable daemon flag';
+}
+
+function providerLabel(provider: TeamProviderCapability): string {
+  if (provider.status === 'available') return provider.label;
+  const hint = provider.hint ?? provider.status;
+  return `${provider.label} (${hint})`;
 }
 
 export function isProviderSelectable(provider: TeamProviderCapability | undefined): boolean {
@@ -138,7 +197,7 @@ export function isProviderSelectable(provider: TeamProviderCapability | undefine
 
 export function providerCapabilityHint(provider: TeamProviderCapability | undefined): string {
   if (!provider) return 'available';
-  const flags: string[] = [provider.status];
+  const flags: string[] = [provider.hint ?? provider.status];
   if (provider.supportsModelOverride) flags.push('model override');
   if (provider.supportsVision) flags.push('vision');
   if (provider.supportsLongRunning) flags.push('status polling');
