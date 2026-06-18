@@ -148,6 +148,14 @@ export interface TeamMessageSummary {
   to: string;
   text: string;
   createdAt: string;
+  orchestration?: {
+    status?: string;
+    provider?: string;
+    model?: string;
+    route?: Array<string | { member?: string; name?: string; role?: string }>;
+    eventCount?: number;
+    events?: Array<{ type?: string; status?: string; member?: string; role?: string; message?: string }>;
+  };
 }
 
 // ── Screen Types ──

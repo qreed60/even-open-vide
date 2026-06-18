@@ -5,6 +5,16 @@ import { truncate, applyScrollIndicators } from 'even-toolkit/text-utils';
 import { fieldJoin, SEP } from 'even-toolkit/glass-format';
 import type { OpenVideSnapshot, OpenVideActions } from '../types';
 
+function routeLabel(route: unknown): string {
+  if (!Array.isArray(route) || route.length === 0) return '';
+  return route.map((item) => {
+    if (typeof item === 'string') return item;
+    if (!item || typeof item !== 'object') return 'member';
+    const record = item as { role?: string; member?: string; name?: string };
+    return record.role || record.member || record.name || 'member';
+  }).join('>');
+}
+
 export const teamChatScreen: GlassScreen<OpenVideSnapshot, OpenVideActions> = {
   display: (snap, nav) => {
     const team = snap.teams.find(t => t.id === snap.selectedTeamId);
@@ -18,7 +28,11 @@ export const teamChatScreen: GlassScreen<OpenVideSnapshot, OpenVideActions> = {
     const contentLines: string[] = [];
     for (const msg of snap.teamMessages) {
       const sender = truncate(msg.from, 8);
-      contentLines.push(`${sender} ${SEP} ${truncate(msg.text, 32)}`);
+      const orchestration = msg.orchestration;
+      const route = routeLabel(orchestration?.route);
+      const status = orchestration?.status ? truncate(orchestration.status.toUpperCase(), 8) : '';
+      const prefix = route || status ? fieldJoin(sender, route || status) : sender;
+      contentLines.push(`${prefix} ${SEP} ${truncate(msg.text, 32)}`);
     }
 
     // Scroll from bottom

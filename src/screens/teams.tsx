@@ -9,11 +9,13 @@ import { useBridge } from '../contexts/bridge';
 import { getHostOptions, resolvePreferredHostId } from '../lib/bridge-hosts';
 import { UNTITLED_DIALOG_CLASS } from '../lib/dialog';
 import { useTranslation } from '../hooks/useTranslation';
+import { isProviderSelectable, providerCapabilityHint, providerOptionsFromMetadata, roleOptionsFromMetadata, type TeamProviderCapability } from '../lib/team-metadata';
 
 interface TeamMember {
   name: string;
   tool: string;
   role: string;
+  model?: string;
 }
 
 interface TeamInfo {
@@ -25,18 +27,6 @@ interface TeamInfo {
   tasksDone?: number;
   tasksTotal?: number;
 }
-
-const TOOLS = [
-  { value: 'claude', label: 'Claude' },
-  { value: 'codex', label: 'Codex' },
-];
-
-const ROLES = [
-  { value: 'lead', label: 'Lead' },
-  { value: 'coder', label: 'Coder' },
-  { value: 'reviewer', label: 'Reviewer' },
-  { value: 'planner', label: 'Planner' },
-];
 
 const EMPTY_TEAM_DRAFT = {
   teamName: '',
@@ -52,6 +42,7 @@ export function TeamsRoute() {
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [teamMetadata, setTeamMetadata] = useState<unknown>(null);
   const navigate = useNavigate();
   const { hosts, activeHostId, switchHost } = useBridge();
   const { t } = useTranslation();
@@ -90,7 +81,14 @@ export function TeamsRoute() {
     setLoading(false);
   };
 
-  useEffect(() => { void refresh(); }, [activeHostId]);
+  const refreshMetadata = async () => {
+    try {
+      const res = await rpc('team.metadata');
+      if (res.ok) setTeamMetadata(res);
+    } catch { /* older daemons do not expose team.metadata */ }
+  };
+
+  useEffect(() => { void refresh(); void refreshMetadata(); }, [activeHostId]);
 
   const { pullHandlers, PullIndicator } = usePullRefresh(refresh);
 
@@ -131,7 +129,7 @@ export function TeamsRoute() {
       const res = await rpc('team.create', {
         name: teamName.trim(),
         cwd: teamCwd.trim(),
-        members: members.map((m) => ({ name: m.name.trim(), tool: m.tool, role: m.role })),
+        members: members.map((m) => ({ name: m.name.trim(), tool: m.tool, role: m.role, model: m.model?.trim() || undefined })),
       });
       if (res.ok) {
         handleCloseForm();
@@ -156,6 +154,9 @@ export function TeamsRoute() {
   });
 
   const hostOptions = getHostOptions(hosts);
+  const toolOptions = providerOptionsFromMetadata(teamMetadata);
+  const roleOptions = roleOptionsFromMetadata(teamMetadata);
+  const providersByValue = new Map<string, TeamProviderCapability>(toolOptions.map((provider) => [provider.value, provider]));
 
   return (
     <div className="flex-1 flex flex-col bg-bg">
@@ -237,12 +238,23 @@ export function TeamsRoute() {
                   <div className="flex gap-1.5">
                     <div className="flex-1 flex flex-col gap-0.5">
                       <span className="text-[11px] tracking-[-0.11px] text-text-dim font-normal">Tool</span>
-                      <Select value={member.tool} options={TOOLS} onValueChange={(v) => updateMember(i, 'tool', v)} />
+                      <Select
+                        value={member.tool}
+                        options={toolOptions}
+                        onValueChange={(v) => {
+                          if (isProviderSelectable(providersByValue.get(v))) updateMember(i, 'tool', v);
+                        }}
+                      />
                     </div>
                     <div className="flex-1 flex flex-col gap-0.5">
                       <span className="text-[11px] tracking-[-0.11px] text-text-dim font-normal">Role</span>
-                      <Select value={member.role} options={ROLES} onValueChange={(v) => updateMember(i, 'role', v)} />
+                      <Select value={member.role} options={roleOptions} onValueChange={(v) => updateMember(i, 'role', v)} />
                     </div>
+                  </div>
+                  <div className="flex flex-col gap-0.5">
+                    <span className="text-[11px] tracking-[-0.11px] text-text-dim font-normal">Model Override</span>
+                    <Input placeholder="Default" value={member.model ?? ''} onChange={(e) => updateMember(i, 'model', e.target.value)} />
+                    <span className="text-[10px] tracking-[-0.1px] text-text-dim">{providerCapabilityHint(providersByValue.get(member.tool))}</span>
                   </div>
                 </div>
               ))}

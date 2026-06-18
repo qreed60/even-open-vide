@@ -26,6 +26,23 @@ const m = createModeEncoder({
 const PAGES = ['Tasks', 'Plan', 'Chat'];
 const CHAT_BUTTONS = ['Chat', 'Input', 'Read'];
 
+function routeLabel(route: unknown): string {
+  if (!Array.isArray(route) || route.length === 0) return '';
+  return route.map((item) => {
+    if (typeof item === 'string') return item;
+    if (!item || typeof item !== 'object') return 'member';
+    const record = item as { role?: string; member?: string; name?: string };
+    return record.role || record.member || record.name || 'member';
+  }).join('>');
+}
+
+function chatLine(msg: OpenVideSnapshot['teamMessages'][number], width: number): string {
+  const route = routeLabel(msg.orchestration?.route);
+  const status = msg.orchestration?.status ? truncate(msg.orchestration.status.toUpperCase(), 8) : '';
+  const sender = route || status ? fieldJoin(truncate(msg.from, 8), route || status) : truncate(msg.from, 10);
+  return `${sender} ${SEP} ${truncate(msg.text, width)}`;
+}
+
 export const teamDetailScreen: GlassScreen<OpenVideSnapshot, OpenVideActions> = {
   display: (snap, nav) => {
     const team = snap.teams.find(t => t.id === snap.selectedTeamId);
@@ -95,7 +112,7 @@ export const teamDetailScreen: GlassScreen<OpenVideSnapshot, OpenVideActions> = 
     // handler cycle through Chat / Read / Input in the header bar instead.
     if (mode === 'chatButtons') {
       const lastMsg = msgs.length > 0
-        ? `${truncate(msgs[msgs.length - 1].from, 8)}: ${truncate(msgs[msgs.length - 1].text, 40)}`
+        ? chatLine(msgs[msgs.length - 1], 38)
         : 'No messages';
       return {
         lines: [
@@ -111,7 +128,7 @@ export const teamDetailScreen: GlassScreen<OpenVideSnapshot, OpenVideActions> = 
       if (msgs.length === 0) {
         return { lines: [...headerLines, line('No messages', 'meta')] };
       }
-      const msgLines = msgs.map(msg => `${truncate(msg.from, 10)} ${SEP} ${truncate(msg.text, 44)}`);
+      const msgLines = msgs.map(msg => chatLine(msg, 40));
       const maxBot = Math.max(0, msgLines.length - contentSlots);
       const cOff = Math.min(offset, maxBot);
       const start = Math.max(0, msgLines.length - contentSlots - cOff);

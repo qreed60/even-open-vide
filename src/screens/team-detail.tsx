@@ -6,6 +6,7 @@ import { ProviderBadge } from '../components/chat/provider-badge';
 import { rpc } from '../domain/daemon-client';
 import { usePullRefresh } from '../hooks/use-pull-refresh';
 import { UNTITLED_DIALOG_CLASS } from '../lib/dialog';
+import { isProviderSelectable, providerCapabilityHint, providerOptionsFromMetadata, roleOptionsFromMetadata, type TeamProviderCapability } from '../lib/team-metadata';
 
 interface TeamTaskSummary {
   id: string;
@@ -24,6 +25,7 @@ interface TeamMemberDraft {
   name: string;
   tool: string;
   role: string;
+  model?: string;
 }
 
 interface TeamPlanVote {
@@ -74,18 +76,6 @@ const PLAN_MAX_ITERATION_OPTIONS = [
   { value: '10', label: '10 rounds' },
 ];
 
-const TEAM_TOOL_OPTIONS = [
-  { value: 'claude', label: 'Claude' },
-  { value: 'codex', label: 'Codex' },
-];
-
-const TEAM_ROLE_OPTIONS = [
-  { value: 'lead', label: 'Lead' },
-  { value: 'planner', label: 'Planner' },
-  { value: 'coder', label: 'Coder' },
-  { value: 'reviewer', label: 'Reviewer' },
-];
-
 type TabId = 'board' | 'plan' | 'chat';
 
 export function TeamDetailRoute() {
@@ -105,6 +95,7 @@ export function TeamDetailRoute() {
   const [teamName, setTeamName] = useState('Team');
   const [teamCwd, setTeamCwd] = useState('');
   const [teamMemberDrafts, setTeamMemberDrafts] = useState<TeamMemberDraft[]>([]);
+  const [teamMetadata, setTeamMetadata] = useState<unknown>(null);
   const [showTeamForm, setShowTeamForm] = useState(false);
   const [savingTeam, setSavingTeam] = useState(false);
 
@@ -120,7 +111,7 @@ export function TeamDetailRoute() {
     try {
       const res = await rpc('team.get', { teamId });
       if (res.ok && res.team) {
-        const team = res.team as { name?: string; workingDirectory?: string; members?: { name: string; tool: string; role: string }[] };
+        const team = res.team as { name?: string; workingDirectory?: string; members?: { name: string; tool: string; role: string; model?: string }[] };
         setTeamName(team.name ?? 'Team');
         setTeamCwd(team.workingDirectory ?? '');
         if (team.members) {
@@ -132,6 +123,7 @@ export function TeamDetailRoute() {
             name: member.name,
             tool: member.tool,
             role: member.role,
+            model: member.model,
           })));
         }
       }
@@ -164,8 +156,17 @@ export function TeamDetailRoute() {
     }
   };
 
+  const refreshMetadata = async () => {
+    try {
+      const res = await rpc('team.metadata');
+      if (res.ok) setTeamMetadata(res);
+    } catch {
+      // Older daemons do not expose metadata.
+    }
+  };
+
   const refresh = async () => {
-    await Promise.all([refreshTeam(), refreshTasks(), refreshPlan()]);
+    await Promise.all([refreshTeam(), refreshTasks(), refreshPlan(), refreshMetadata()]);
     setLoading(false);
   };
 
@@ -264,7 +265,7 @@ export function TeamDetailRoute() {
         teamId,
         name: teamName.trim(),
         cwd: teamCwd.trim(),
-        members,
+        members: members.map((member) => ({ ...member, model: member.model?.trim() || undefined })),
       });
       if (res.ok) {
         setShowTeamForm(false);
@@ -295,6 +296,9 @@ export function TeamDetailRoute() {
   }
 
   const latestRevision = useMemo(() => latestPlan?.revisions?.[latestPlan.revisions.length - 1] ?? null, [latestPlan]);
+  const teamToolOptions = providerOptionsFromMetadata(teamMetadata);
+  const teamRoleOptions = roleOptionsFromMetadata(teamMetadata);
+  const teamProvidersByValue = new Map<string, TeamProviderCapability>(teamToolOptions.map((provider) => [provider.value, provider]));
 
   const tabs: { id: TabId; label: string }[] = [
     { id: 'board', label: 'Board' },
@@ -483,12 +487,23 @@ export function TeamDetailRoute() {
                       <div className="flex gap-1.5">
                         <div className="flex-1 flex flex-col gap-0.5">
                           <span className="text-[11px] tracking-[-0.11px] text-text-dim font-normal">Tool</span>
-                          <Select value={member.tool} options={TEAM_TOOL_OPTIONS} onValueChange={(value) => updateTeamMember(index, 'tool', value)} />
+                          <Select
+                            value={member.tool}
+                            options={teamToolOptions}
+                            onValueChange={(value) => {
+                              if (isProviderSelectable(teamProvidersByValue.get(value))) updateTeamMember(index, 'tool', value);
+                            }}
+                          />
                         </div>
                         <div className="flex-1 flex flex-col gap-0.5">
                           <span className="text-[11px] tracking-[-0.11px] text-text-dim font-normal">Role</span>
-                          <Select value={member.role} options={TEAM_ROLE_OPTIONS} onValueChange={(value) => updateTeamMember(index, 'role', value)} />
+                          <Select value={member.role} options={teamRoleOptions} onValueChange={(value) => updateTeamMember(index, 'role', value)} />
                         </div>
+                      </div>
+                      <div className="flex flex-col gap-0.5">
+                        <span className="text-[11px] tracking-[-0.11px] text-text-dim font-normal">Model Override</span>
+                        <Input placeholder="Default" value={member.model ?? ''} onChange={(e) => updateTeamMember(index, 'model', e.target.value)} />
+                        <span className="text-[10px] tracking-[-0.1px] text-text-dim">{providerCapabilityHint(teamProvidersByValue.get(member.tool))}</span>
                       </div>
                     </div>
                   ))}
