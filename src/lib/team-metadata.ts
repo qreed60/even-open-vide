@@ -3,6 +3,8 @@ export interface TeamProviderCapability {
   label: string;
   status: 'available' | 'unavailable' | 'planned' | 'disabled';
   hint?: string;
+  enabled?: boolean;
+  executable?: boolean;
   supportsModelOverride?: boolean;
   supportsVision?: boolean;
   supportsLongRunning?: boolean;
@@ -42,6 +44,7 @@ function titleize(value: string): string {
 
 function normalizeStatus(value: unknown): TeamProviderCapability['status'] {
   if (value === 'planned' || value === 'disabled' || value === 'unavailable') return value;
+  if (value === 'enabled') return 'available';
   if (value === false) return 'unavailable';
   return 'available';
 }
@@ -107,6 +110,8 @@ export function providerOptionsFromMetadata(metadata: unknown): TeamProviderCapa
         label: typeof item.label === 'string' ? item.label : titleize(normalizedValue),
         status: normalizeProviderStatus(normalizedValue, baseStatus, executable, enabled),
         hint: providerHint(normalizedValue, baseStatus, executable, enabled, installed),
+        enabled,
+        executable,
         supportsModelOverride: Boolean(item.supportsModelOverride ?? item.modelOverride),
         supportsVision: Boolean(item.supportsVision ?? item.vision),
         supportsLongRunning: Boolean(item.supportsLongRunning ?? item.supportsStatusPolling ?? item.statusPolling),
@@ -125,6 +130,8 @@ export function providerOptionsFromMetadata(metadata: unknown): TeamProviderCapa
         label: typeof item.label === 'string' ? item.label : titleize(normalizedValue),
         status: normalizeProviderStatus(normalizedValue, baseStatus, executable, enabled),
         hint: providerHint(normalizedValue, baseStatus, executable, enabled, installed),
+        enabled,
+        executable,
         supportsModelOverride: Boolean(item.supportsModelOverride ?? item.modelOverride),
         supportsVision: Boolean(item.supportsVision ?? item.vision),
         supportsLongRunning: Boolean(item.supportsLongRunning ?? item.supportsStatusPolling ?? item.statusPolling),
@@ -165,9 +172,10 @@ function normalizeProviderStatus(
 ): TeamProviderCapability['status'] {
   if (value === 'openhands') return 'planned';
   if (value !== 'opencode') return baseStatus;
-  if (baseStatus === 'disabled' || enabled === false || executable === false) return 'disabled';
-  if (baseStatus === 'planned' || baseStatus === 'unavailable') return baseStatus;
-  return enabled === true && executable === true ? 'available' : 'disabled';
+  if (enabled === true && executable === true) return 'available';
+  if (enabled === false || executable === false) return 'disabled';
+  if (baseStatus === 'planned' || baseStatus === 'unavailable' || baseStatus === 'disabled') return baseStatus;
+  return 'disabled';
 }
 
 function providerHint(
@@ -180,8 +188,11 @@ function providerHint(
   if (value === 'openhands') return 'planned';
   if (value !== 'opencode') return undefined;
   if (enabled === true && executable === true) return 'enabled';
-  if (installed === true || enabled === false || executable === false) return 'installed, disabled';
+  if (enabled === false) return 'daemon disabled';
+  if (executable === false) return 'not executable';
+  if (baseStatus === 'disabled') return 'daemon disabled';
   if (baseStatus === 'unavailable') return 'unavailable';
+  if (installed === true) return 'installed, disabled';
   return 'enable daemon flag';
 }
 
@@ -192,7 +203,10 @@ function providerLabel(provider: TeamProviderCapability): string {
 }
 
 export function isProviderSelectable(provider: TeamProviderCapability | undefined): boolean {
-  return !provider || provider.status === 'available';
+  if (!provider) return true;
+  if (provider.value === 'openhands') return false;
+  if (provider.value === 'opencode') return provider.enabled === true && provider.executable === true;
+  return provider.status === 'available';
 }
 
 export function providerCapabilityHint(provider: TeamProviderCapability | undefined): string {
