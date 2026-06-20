@@ -17,6 +17,11 @@ export interface QueueDisplayItem {
   resourceKey?: string;
   provider?: string;
   model?: string;
+  runIds?: string[];
+  primaryRunId?: string;
+  primaryRunStatus?: string;
+  primaryRunCurrentState?: string;
+  linkedQueueTaskId?: string;
   linkedBoardTaskId?: string;
   linkedBoardTaskStatus?: string;
   createdAt?: string;
@@ -188,12 +193,21 @@ function normalizeItem(
   const status = directStatus(value, kind);
   if (kind === 'task' && !isQueueTaskRecord(value, status)) return null;
   const teamId = readNestedText(value, ['teamId', 'team_id']);
-  const id = readNestedText(value, ['id', 'taskId', 'task_id', 'runId', 'run_id', 'resourceKey']) ?? `${kind}-${teamId ?? 'global'}-${index}`;
-  const title = readNestedText(value, ['title', 'subject', 'name', 'prompt', 'request', 'description']) ?? id;
+  const explicitId = readNestedText(value, ['id', 'taskId', 'task_id', 'runId', 'run_id', 'resourceKey']);
   const resourceKey = readNestedText(value, ['resourceKey', 'resource_key', 'key']) ?? readNestedText(value, ['providerModelKey']);
+  const provider = readNestedText(value, ['provider', 'tool']);
+  const model = readNestedText(value, ['model', 'modelId', 'model_id']);
+  if (kind === 'run' && !explicitId) return null;
+  if (kind === 'resource' && !explicitId && !resourceKey && !provider && !model) return null;
+  const resourceIdentity = [provider, model].filter(Boolean).join(':') || undefined;
+  const id = explicitId ?? resourceKey ?? resourceIdentity ?? `${kind}-${teamId ?? 'global'}-${index}`;
+  const title = readNestedText(value, ['title', 'subject', 'name', 'prompt', 'request', 'description']) ?? id;
   const linkedQueueTaskId = readNestedText(value, ['taskId', 'task_id']);
   const linkedQueueTaskRef = linkedQueueTaskId ? queueTaskBoardRefs.get(linkedQueueTaskId) : undefined;
   const linkedBoardTaskId = readNestedText(value, ['boardTaskId', 'board_task_id']) ?? linkedQueueTaskRef?.boardTaskId;
+  const runIds = Array.isArray(value.runIds)
+    ? value.runIds.map((entry) => toText(entry)).filter((entry): entry is string => Boolean(entry))
+    : undefined;
   return {
     id,
     kind,
@@ -207,14 +221,53 @@ function normalizeItem(
     currentMember: readNestedText(value, ['currentMember', 'current_member', 'member', 'owner', 'assignee']),
     currentState: readNestedText(value, ['currentState', 'current_state', 'stage', 'step']),
     resourceKey,
-    provider: readNestedText(value, ['provider', 'tool']),
-    model: readNestedText(value, ['model', 'modelId', 'model_id']),
+    provider,
+    model,
+    runIds,
+    linkedQueueTaskId,
     linkedBoardTaskId,
     linkedBoardTaskStatus: linkedBoardTaskId ? boardTaskStatuses.get(linkedBoardTaskId) ?? linkedQueueTaskRef?.boardTaskStatus : undefined,
     createdAt: readNestedText(value, ['createdAt', 'created_at', 'queuedAt', 'queued_at']),
     startedAt: readNestedText(value, ['startedAt', 'started_at', 'dispatchedAt', 'dispatched_at']),
     finishedAt: readNestedText(value, ['finishedAt', 'finished_at', 'completedAt', 'completed_at', 'endedAt', 'ended_at']),
   };
+}
+
+function mergeTaskRunPairs(items: QueueDisplayItem[]): QueueDisplayItem[] {
+  const runs = items.filter((item) => item.kind === 'run');
+  const runsById = new Map(runs.map((run) => [run.id, run]));
+  const mergedRunIds = new Set<string>();
+
+  const mergedItems = items.map((item) => {
+    if (item.kind !== 'task') return item;
+    const linkedRuns = [
+      ...(item.runIds ?? []).map((runId) => runsById.get(runId)).filter((run): run is QueueDisplayItem => Boolean(run)),
+      ...runs.filter((run) => run.linkedQueueTaskId === item.id),
+    ];
+    const uniqueRuns = linkedRuns.filter((run, index, allRuns) => allRuns.findIndex((entry) => entry.id === run.id) === index);
+    if (uniqueRuns.length === 0) return item;
+
+    for (const run of uniqueRuns) mergedRunIds.add(run.id);
+    const primaryRun = uniqueRuns[0];
+    return {
+      ...item,
+      category: item.category === 'other' ? primaryRun.category : item.category,
+      status: item.status === 'unknown' ? primaryRun.status : item.status,
+      route: item.route ?? primaryRun.route,
+      currentMember: item.currentMember ?? primaryRun.currentMember,
+      currentState: item.currentState ?? primaryRun.currentState,
+      resourceKey: item.resourceKey ?? primaryRun.resourceKey,
+      provider: item.provider ?? primaryRun.provider,
+      model: item.model ?? primaryRun.model,
+      primaryRunId: primaryRun.id,
+      primaryRunStatus: primaryRun.status,
+      primaryRunCurrentState: primaryRun.currentState,
+      startedAt: item.startedAt ?? primaryRun.startedAt,
+      finishedAt: item.finishedAt ?? primaryRun.finishedAt,
+    };
+  });
+
+  return mergedItems.filter((item) => item.kind !== 'run' || !mergedRunIds.has(item.id));
 }
 
 export function normalizeQueueData(responses: RpcResponse[], teamNames = new Map<string, string>()): QueueData {
@@ -232,12 +285,12 @@ export function normalizeQueueData(responses: RpcResponse[], teamNames = new Map
       .filter((entry): entry is QueueDisplayItem => Boolean(entry))
   ));
   const seen = new Set<string>();
-  const items = normalized.filter((item) => {
+  const items = mergeTaskRunPairs(normalized.filter((item) => {
     const key = `${item.kind}:${item.id}:${item.status}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
-  });
+  }));
   return {
     items,
     resources,

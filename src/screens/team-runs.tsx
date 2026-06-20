@@ -58,6 +58,7 @@ function QueueItemCard({ item, showTeam }: { item: QueueDisplayItem; showTeam: b
     item.source,
     showTeam ? item.teamName ?? item.teamId : undefined,
     item.linkedBoardTaskStatus ? `linked board task: ${item.linkedBoardTaskStatus}` : undefined,
+    item.primaryRunId ? `run ${item.primaryRunId}${item.primaryRunStatus ? ` ${item.primaryRunStatus}` : ''}` : undefined,
     resourceLabel,
   ].filter(Boolean);
 
@@ -70,9 +71,9 @@ function QueueItemCard({ item, showTeam }: { item: QueueDisplayItem; showTeam: b
             <Badge variant={badgeVariant(item)}>{item.status}</Badge>
           </div>
           {meta.length > 0 && <p className="data-mono mt-1">{meta.join(' · ')}</p>}
-          {(item.route || item.currentMember || item.currentState) && (
+          {(item.route || item.currentMember || item.currentState || item.primaryRunCurrentState) && (
             <p className="data-mono mt-1">
-              {[item.route ? `route ${item.route}` : null, item.currentMember ? `@${item.currentMember}` : null, item.currentState].filter(Boolean).join(' · ')}
+              {[item.route ? `route ${item.route}` : null, item.currentMember ? `@${item.currentMember}` : null, item.currentState, item.primaryRunCurrentState ? `run state ${item.primaryRunCurrentState}` : null].filter(Boolean).join(' · ')}
             </p>
           )}
           {(createdAt || startedAt || finishedAt) && (
