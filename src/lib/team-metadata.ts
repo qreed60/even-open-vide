@@ -59,9 +59,28 @@ function booleanField(...values: unknown[]): boolean | undefined {
 function metadataRecord(metadata: unknown): Record<string, unknown> {
   if (!metadata || typeof metadata !== 'object') return {};
   const record = metadata as Record<string, unknown>;
-  const nested = record.metadata;
-  if (nested && typeof nested === 'object') return nested as Record<string, unknown>;
+  for (const key of ['metadata', 'result', 'data', 'teamMetadata']) {
+    const nested = nestedRecord(record, key);
+    if (nested) return nested;
+  }
   return record;
+}
+
+function nestedRecord(record: Record<string, unknown>, key: string): Record<string, unknown> | undefined {
+  const value = record[key];
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function providerMetadataFromRecord(record: Record<string, unknown>): unknown {
+  const capabilities = nestedRecord(record, 'capabilities');
+  const providerCapabilities = nestedRecord(record, 'providerCapabilities');
+  return record.providers
+    ?? record.tools
+    ?? record.providerCapabilities
+    ?? providerCapabilities?.providers
+    ?? providerCapabilities?.tools
+    ?? capabilities?.providers
+    ?? capabilities?.tools;
 }
 
 export function roleOptionsFromMetadata(metadata: unknown): SelectOption[] {
@@ -86,14 +105,14 @@ export function roleOptionsFromMetadata(metadata: unknown): SelectOption[] {
 
 export function providerOptionsFromMetadata(metadata: unknown): TeamProviderCapability[] {
   const record = metadataRecord(metadata);
-  const rawProviders = record.providers ?? record.tools;
-  const providers: TeamProviderCapability[] = [];
+  const rawProviders = providerMetadataFromRecord(record);
+  const metadataProviders: TeamProviderCapability[] = [];
 
   if (Array.isArray(rawProviders)) {
     for (const provider of rawProviders) {
       if (typeof provider === 'string') {
         const value = provider.toLowerCase();
-        providers.push({ value, label: titleize(value), status: value === 'opencode' ? 'disabled' : value === 'openhands' ? 'planned' : 'available' });
+        metadataProviders.push({ value, label: titleize(value), status: value === 'opencode' ? 'disabled' : value === 'openhands' ? 'planned' : 'available' });
         continue;
       }
       if (!provider || typeof provider !== 'object') continue;
@@ -105,7 +124,7 @@ export function providerOptionsFromMetadata(metadata: unknown): TeamProviderCapa
       const enabled = booleanField(item.enabled, item.available);
       const installed = booleanField(item.installed, item.detected, item.present);
       const baseStatus = normalizeStatus(item.status ?? item.available);
-      providers.push({
+      metadataProviders.push({
         value: normalizedValue,
         label: typeof item.label === 'string' ? item.label : titleize(normalizedValue),
         status: normalizeProviderStatus(normalizedValue, baseStatus, executable, enabled),
@@ -125,7 +144,7 @@ export function providerOptionsFromMetadata(metadata: unknown): TeamProviderCapa
       const enabled = booleanField(item.enabled, item.available, typeof provider === 'boolean' ? provider : undefined);
       const installed = booleanField(item.installed, item.detected, item.present, typeof provider === 'boolean' ? provider : undefined);
       const baseStatus = normalizeStatus(item.status ?? item.available ?? provider);
-      providers.push({
+      metadataProviders.push({
         value: normalizedValue,
         label: typeof item.label === 'string' ? item.label : titleize(normalizedValue),
         status: normalizeProviderStatus(normalizedValue, baseStatus, executable, enabled),
@@ -139,9 +158,14 @@ export function providerOptionsFromMetadata(metadata: unknown): TeamProviderCapa
     }
   }
 
-  const hasMetadata = providers.length > 0;
+  const hasMetadata = metadataProviders.length > 0;
   const byValue = new Map<string, TeamProviderCapability>();
-  for (const provider of (hasMetadata ? providers : DEFAULT_PROVIDERS)) {
+
+  for (const fallback of DEFAULT_PROVIDERS) {
+    byValue.set(fallback.value, { ...fallback, status: hasMetadata ? 'unavailable' : fallback.status });
+  }
+
+  for (const provider of metadataProviders) {
     const value = provider.value.toLowerCase();
     byValue.set(value, {
       ...provider,
@@ -150,12 +174,6 @@ export function providerOptionsFromMetadata(metadata: unknown): TeamProviderCapa
       status: value === 'openhands' ? 'planned' : provider.status,
       hint: value === 'openhands' ? 'planned' : provider.hint,
     });
-  }
-
-  for (const fallback of DEFAULT_PROVIDERS) {
-    if (!byValue.has(fallback.value)) {
-      byValue.set(fallback.value, { ...fallback, status: hasMetadata ? 'unavailable' : fallback.status });
-    }
   }
 
   return Array.from(byValue.values()).map((provider) => ({
@@ -187,10 +205,9 @@ function providerHint(
 ): string | undefined {
   if (value === 'openhands') return 'planned';
   if (value !== 'opencode') return undefined;
-  if (enabled === true && executable === true) return 'enabled';
-  if (enabled === false) return 'daemon disabled';
-  if (executable === false) return 'not executable';
-  if (baseStatus === 'disabled') return 'daemon disabled';
+  if (enabled === true && executable === true) return undefined;
+  if (enabled === false || executable === false) return installed === true ? 'installed, disabled' : 'enable daemon flag';
+  if (baseStatus === 'disabled') return installed === true ? 'installed, disabled' : 'enable daemon flag';
   if (baseStatus === 'unavailable') return 'unavailable';
   if (installed === true) return 'installed, disabled';
   return 'enable daemon flag';
@@ -207,6 +224,18 @@ export function isProviderSelectable(provider: TeamProviderCapability | undefine
   if (provider.value === 'openhands') return false;
   if (provider.value === 'opencode') return provider.enabled === true && provider.executable === true;
   return provider.status === 'available';
+}
+
+export function assertProviderMetadataOverrideForDevelopment(): void {
+  const opencode = providerOptionsFromMetadata({
+    providers: [
+      { id: 'opencode', label: 'OpenCode', enabled: true, executable: true, status: 'enabled', modelOverride: true },
+    ],
+  }).find((provider) => provider.value === 'opencode');
+
+  if (!isProviderSelectable(opencode) || opencode?.label !== 'OpenCode' || opencode.hint === 'enable daemon flag') {
+    throw new Error('metadata-derived OpenCode provider must override the fallback option');
+  }
 }
 
 export function providerCapabilityHint(provider: TeamProviderCapability | undefined): string {
