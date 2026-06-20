@@ -33,7 +33,7 @@ const DEFAULT_PROVIDERS: TeamProviderCapability[] = [
   { value: 'codex', label: 'Codex', status: 'available', supportsModelOverride: true, supportsLongRunning: true },
   { value: 'gemini', label: 'Gemini', status: 'available', supportsModelOverride: true, supportsVision: true },
   { value: 'opencode', label: 'OpenCode', status: 'unavailable', hint: 'enable daemon flag', supportsModelOverride: true, supportsLongRunning: true },
-  { value: 'openhands', label: 'OpenHands', status: 'planned', hint: 'planned' },
+  { value: 'openhands', label: 'OpenHands', status: 'unavailable', hint: 'unavailable', supportsModelOverride: true, supportsLongRunning: true },
 ];
 
 function titleize(value: string): string {
@@ -112,7 +112,7 @@ export function providerOptionsFromMetadata(metadata: unknown): TeamProviderCapa
     for (const provider of rawProviders) {
       if (typeof provider === 'string') {
         const value = provider.toLowerCase();
-        metadataProviders.push({ value, label: titleize(value), status: value === 'opencode' ? 'disabled' : value === 'openhands' ? 'planned' : 'available' });
+        metadataProviders.push({ value, label: titleize(value), status: value === 'opencode' || value === 'openhands' ? 'disabled' : 'available' });
         continue;
       }
       if (!provider || typeof provider !== 'object') continue;
@@ -171,8 +171,6 @@ export function providerOptionsFromMetadata(metadata: unknown): TeamProviderCapa
       ...provider,
       value,
       label: value === 'opencode' ? 'OpenCode' : value === 'openhands' ? 'OpenHands' : provider.label,
-      status: value === 'openhands' ? 'planned' : provider.status,
-      hint: value === 'openhands' ? 'planned' : provider.hint,
     });
   }
 
@@ -188,8 +186,7 @@ function normalizeProviderStatus(
   executable: boolean | undefined,
   enabled: boolean | undefined,
 ): TeamProviderCapability['status'] {
-  if (value === 'openhands') return 'planned';
-  if (value !== 'opencode') return baseStatus;
+  if (value !== 'opencode' && value !== 'openhands') return baseStatus;
   if (enabled === true && executable === true) return 'available';
   if (enabled === false || executable === false) return 'disabled';
   if (baseStatus === 'planned' || baseStatus === 'unavailable' || baseStatus === 'disabled') return baseStatus;
@@ -203,8 +200,7 @@ function providerHint(
   enabled: boolean | undefined,
   installed: boolean | undefined,
 ): string | undefined {
-  if (value === 'openhands') return 'planned';
-  if (value !== 'opencode') return undefined;
+  if (value !== 'opencode' && value !== 'openhands') return undefined;
   if (enabled === true && executable === true) return undefined;
   if (enabled === false || executable === false) return installed === true ? 'installed, disabled' : 'enable daemon flag';
   if (baseStatus === 'disabled') return installed === true ? 'installed, disabled' : 'enable daemon flag';
@@ -221,20 +217,33 @@ function providerLabel(provider: TeamProviderCapability): string {
 
 export function isProviderSelectable(provider: TeamProviderCapability | undefined): boolean {
   if (!provider) return true;
-  if (provider.value === 'openhands') return false;
-  if (provider.value === 'opencode') return provider.enabled === true && provider.executable === true;
+  if (provider.value === 'opencode' || provider.value === 'openhands') return provider.enabled === true && provider.executable === true;
   return provider.status === 'available';
 }
 
 export function assertProviderMetadataOverrideForDevelopment(): void {
-  const opencode = providerOptionsFromMetadata({
+  const providers = providerOptionsFromMetadata({
     providers: [
       { id: 'opencode', label: 'OpenCode', enabled: true, executable: true, status: 'enabled', modelOverride: true },
+      { id: 'openhands', label: 'OpenHands', enabled: true, executable: true, status: 'disabled', modelOverride: true },
     ],
-  }).find((provider) => provider.value === 'opencode');
+  });
+  const opencode = providers.find((provider) => provider.value === 'opencode');
+  const openhands = providers.find((provider) => provider.value === 'openhands');
+  const disabledOpenHands = providerOptionsFromMetadata({
+    providers: [
+      { id: 'openhands', label: 'OpenHands', enabled: false, executable: false, installed: true, status: 'enabled' },
+    ],
+  }).find((provider) => provider.value === 'openhands');
 
   if (!isProviderSelectable(opencode) || opencode?.label !== 'OpenCode' || opencode.hint === 'enable daemon flag') {
     throw new Error('metadata-derived OpenCode provider must override the fallback option');
+  }
+  if (!isProviderSelectable(openhands) || openhands?.label !== 'OpenHands' || openhands.hint === 'planned') {
+    throw new Error('metadata-derived OpenHands provider must override the fallback option when executable');
+  }
+  if (isProviderSelectable(disabledOpenHands) || disabledOpenHands?.status !== 'disabled' || disabledOpenHands.hint !== 'installed, disabled') {
+    throw new Error('metadata-derived OpenHands provider must stay disabled without enabled/executable metadata');
   }
 }
 
