@@ -57,6 +57,7 @@ function QueueItemCard({ item, showTeam }: { item: QueueDisplayItem; showTeam: b
     item.kind,
     item.source,
     showTeam ? item.teamName ?? item.teamId : undefined,
+    item.linkedBoardTaskStatus ? `linked board task: ${item.linkedBoardTaskStatus}` : undefined,
     resourceLabel,
   ].filter(Boolean);
 
