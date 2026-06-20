@@ -3,6 +3,7 @@ import { Card, Badge, Button, Input, Select, EmptyState, ListItem, Dialog, useDr
 import { IcEditAdd, IcFeatAccount, IcStatusFile, IcEditTrash } from 'even-toolkit/web/icons/svg-icons';
 import { useNavigate } from 'react-router';
 import { rpc } from '../domain/daemon-client';
+import type { RpcResponse } from '../domain/daemon-client';
 import { usePullRefresh } from '../hooks/use-pull-refresh';
 import { consumePickedLocation, useDialogDraft } from '../hooks/use-dialog-draft';
 import { useBridge } from '../contexts/bridge';
@@ -10,6 +11,7 @@ import { getHostOptions, resolvePreferredHostId } from '../lib/bridge-hosts';
 import { UNTITLED_DIALOG_CLASS } from '../lib/dialog';
 import { useTranslation } from '../hooks/useTranslation';
 import { isProviderSelectable, providerCapabilityHint, providerOptionsFromMetadata, roleOptionsFromMetadata, type TeamProviderCapability } from '../lib/team-metadata';
+import { normalizeQueueData, summaryForTeam, type QueueSummary } from '../lib/team-queue';
 
 interface TeamMember {
   name: string;
@@ -61,6 +63,7 @@ export function TeamsRoute() {
   const [showForm, setShowForm] = useState(false);
   const [creating, setCreating] = useState(false);
   const [teamMetadata, setTeamMetadata] = useState<unknown>(null);
+  const [queueSummaryByTeam, setQueueSummaryByTeam] = useState<Record<string, QueueSummary>>({});
   const navigate = useNavigate();
   const { hosts, activeHostId, switchHost } = useBridge();
   const { t } = useTranslation();
@@ -100,10 +103,31 @@ export function TeamsRoute() {
     try {
       const res = await rpc('team.list');
       if (res.ok && Array.isArray(res.teams)) {
-        setTeams(res.teams as TeamInfo[]);
+        const nextTeams = res.teams as TeamInfo[];
+        setTeams(nextTeams);
+        void refreshQueueSummary(nextTeams);
       }
     } catch { /* ignore */ }
     setLoading(false);
+  };
+
+  const refreshQueueSummary = async (nextTeams: TeamInfo[]) => {
+    const teamNames = new Map(nextTeams.map((team) => [team.id, team.name]));
+    const responses = await Promise.all([
+      rpc('global.queue.status').catch(() => ({ ok: false } as RpcResponse)),
+      rpc('team.queue.status').catch(() => ({ ok: false } as RpcResponse)),
+      rpc('team.run.list').catch(() => ({ ok: false } as RpcResponse)),
+      rpc('model.resources.status').catch(() => ({ ok: false } as RpcResponse)),
+    ]);
+    const queueData = normalizeQueueData(responses, teamNames);
+    const nextSummary: Record<string, QueueSummary> = {};
+    for (const team of nextTeams) {
+      const summary = summaryForTeam([...queueData.items, ...queueData.resources], team.id);
+      if (summary.taskCount || summary.runningCount || summary.queuedCount || summary.waitingCount) {
+        nextSummary[team.id] = summary;
+      }
+    }
+    setQueueSummaryByTeam(nextSummary);
   };
 
   const refreshMetadata = async () => {
@@ -312,12 +336,16 @@ export function TeamsRoute() {
         {teams.map((team) => {
           const done = team.tasksDone ?? 0;
           const total = team.tasksTotal ?? 0;
+          const queueSummary = queueSummaryByTeam[team.id];
+          const queueSubtitle = queueSummary
+            ? ` · ${queueSummary.taskCount} queued-task${queueSummary.taskCount !== 1 ? 's' : ''} · ${queueSummary.runningCount} running · ${queueSummary.queuedCount} queued · ${queueSummary.waitingCount} waiting`
+            : '';
 
           return (
             <ListItem
               key={team.id}
               title={team.name}
-              subtitle={`${team.workingDirectory} · ${team.members.length} member${team.members.length !== 1 ? 's' : ''}`}
+              subtitle={`${team.workingDirectory} · ${team.members.length} member${team.members.length !== 1 ? 's' : ''}${queueSubtitle}`}
               leading={
                 <Badge variant="neutral">{team.members.length}</Badge>
               }

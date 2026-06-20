@@ -27,6 +27,7 @@ function getPageTitle(pathname: string, t: (key: string) => string): string {
   if (pathname.startsWith('/chat')) return t('web.chat');
   if (pathname.startsWith('/settings')) return t('web.settings');
   if (pathname.startsWith('/guide')) return t('web.guide');
+  if (pathname.startsWith('/runs')) return t('web.runsQueue');
   if (pathname.startsWith('/schedules')) return t('web.schedules');
   if (pathname.startsWith('/files')) return t('web.files');
   if (pathname.startsWith('/diffs')) return t('web.diffs');
@@ -40,6 +41,7 @@ function deriveActiveId(pathname: string): string {
   if (pathname.startsWith('/sessions') || pathname.startsWith('/chat')) return '/sessions';
   if (pathname.startsWith('/teams') || pathname.startsWith('/team')) return '/teams';
   if (pathname.startsWith('/hosts') || pathname.startsWith('/host')) return '/hosts';
+  if (pathname.startsWith('/runs')) return '/runs';
   if (pathname.startsWith('/schedules')) return '/schedules';
   if (pathname.startsWith('/files')) return '/files';
   if (pathname.startsWith('/guide')) return '/guide';
@@ -56,6 +58,7 @@ export function Shell() {
     { id: '/sessions', label: t('web.sessions'), section: 'Navigation', icon: <IcEditChecklist {...iconProps} /> },
     { id: '/teams', label: t('web.teams'), section: 'Navigation', icon: <IcFeatAccount {...iconProps} /> },
     { id: '/hosts', label: t('web.hosts'), section: 'Navigation', icon: <IcStatusDisconnected {...iconProps} /> },
+    { id: '/runs', label: t('web.runsQueue'), section: 'Tools', icon: <IcFeatTimeCounting {...iconProps} /> },
     { id: '/schedules', label: t('web.schedules'), section: 'Tools', icon: <IcFeatTimeCounting {...iconProps} /> },
     { id: '/files?source=drawer', label: t('web.files'), section: 'Tools', icon: <IcStatusFile {...iconProps} /> },
   ];

@@ -7,6 +7,7 @@ import { rpc } from '../domain/daemon-client';
 import { usePullRefresh } from '../hooks/use-pull-refresh';
 import { UNTITLED_DIALOG_CLASS } from '../lib/dialog';
 import { isProviderSelectable, providerCapabilityHint, providerOptionsFromMetadata, roleOptionsFromMetadata, type TeamProviderCapability } from '../lib/team-metadata';
+import { TeamRunsPanel } from './team-runs';
 
 interface TeamTaskSummary {
   id: string;
@@ -77,7 +78,7 @@ const PLAN_MAX_ITERATION_OPTIONS = [
   { value: '10', label: '10 rounds' },
 ];
 
-type TabId = 'board' | 'plan' | 'chat';
+type TabId = 'board' | 'plan' | 'chat' | 'runs';
 
 let memberDraftIdCounter = 0;
 
@@ -318,6 +319,7 @@ export function TeamDetailRoute() {
     { id: 'board', label: 'Board' },
     { id: 'plan', label: 'Plan' },
     { id: 'chat', label: 'Chat' },
+    { id: 'runs', label: 'Runs' },
   ];
 
   return (
@@ -642,6 +644,10 @@ export function TeamDetailRoute() {
               </div>
             </Dialog>
           </div>
+        )}
+
+        {activeTab === 'runs' && (
+          <TeamRunsPanel teamId={teamId} teamName={teamName} embedded />
         )}
       </div>
     </div>

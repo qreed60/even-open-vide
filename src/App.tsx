@@ -18,6 +18,7 @@ import { SchedulesRoute } from './screens/schedules';
 import { TeamsRoute } from './screens/teams';
 import { TeamDetailRoute } from './screens/team-detail';
 import { TeamChatRoute } from './screens/team-chat';
+import { TeamRunsRoute } from './screens/team-runs';
 import { OpenVideGlasses } from './glass/OpenVideGlasses';
 import { GuideRoute } from './screens/guide';
 import { OpenVideGuideGate } from './components/guide/openvide-guide-gate';
@@ -54,6 +55,7 @@ export function App() {
               <Route path="/guide" element={<GuideRoute />} />
               <Route path="/prompts" element={<PromptsRoute />} />
               <Route path="/schedules" element={<SchedulesRoute />} />
+              <Route path="/runs" element={<TeamRunsRoute />} />
               <Route path="/teams" element={<TeamsRoute />} />
               <Route path="/team" element={<TeamDetailRoute />} />
               <Route path="/team-chat" element={<TeamChatRoute />} />

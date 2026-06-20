@@ -168,6 +168,7 @@ const translations: Record<string, Record<AppLanguage, string>> = {
   'web.chat': { en: 'Chat', it: 'Chat', es: 'Chat', fr: 'Chat', de: 'Chat', pt: 'Chat', ja: '\u30c1\u30e3\u30c3\u30c8', zh: '\u804a\u5929', ko: '\ucc44\ud305', ru: '\u0427\u0430\u0442' },
   'web.teamChat': { en: 'Team Chat', it: 'Chat Team', es: 'Chat de Equipo', fr: 'Chat Equipe', de: 'Team-Chat', pt: 'Chat da Equipe', ja: '\u30c1\u30fc\u30e0\u30c1\u30e3\u30c3\u30c8', zh: '\u56e2\u961f\u804a\u5929', ko: '\ud300 \ucc44\ud305', ru: '\u0427\u0430\u0442 \u043a\u043e\u043c\u0430\u043d\u0434\u044b' },
   'web.teams': { en: 'Teams', it: 'Team', es: 'Equipos', fr: 'Equipes', de: 'Teams', pt: 'Equipes', ja: '\u30c1\u30fc\u30e0', zh: '\u56e2\u961f', ko: '\ud300', ru: '\u041a\u043e\u043c\u0430\u043d\u0434\u044b' },
+  'web.runsQueue': { en: 'Runs / Queue', it: 'Runs / Queue', es: 'Runs / Queue', fr: 'Runs / Queue', de: 'Runs / Queue', pt: 'Runs / Queue', ja: 'Runs / Queue', zh: 'Runs / Queue', ko: 'Runs / Queue', ru: 'Runs / Queue' },
   'web.team': { en: 'Team', it: 'Team', es: 'Equipo', fr: 'Equipe', de: 'Team', pt: 'Equipe', ja: '\u30c1\u30fc\u30e0', zh: '\u56e2\u961f', ko: '\ud300', ru: '\u041a\u043e\u043c\u0430\u043d\u0434\u0430' },
 
   // Web UI - Hosts
