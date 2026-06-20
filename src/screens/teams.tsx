@@ -12,6 +12,7 @@ import { UNTITLED_DIALOG_CLASS } from '../lib/dialog';
 import { useTranslation } from '../hooks/useTranslation';
 import { isProviderSelectable, providerCapabilityHint, providerOptionsFromMetadata, roleOptionsFromMetadata, type TeamProviderCapability } from '../lib/team-metadata';
 import { normalizeQueueData, summaryForTeam, type QueueSummary } from '../lib/team-queue';
+import { normalizeBoardItems } from '../lib/team-board';
 
 interface TeamMember {
   name: string;
@@ -27,8 +28,6 @@ interface TeamInfo {
   workingDirectory: string;
   members: TeamMember[];
   createdAt: string;
-  tasksDone?: number;
-  tasksTotal?: number;
 }
 
 let memberDraftIdCounter = 0;
@@ -64,6 +63,7 @@ export function TeamsRoute() {
   const [creating, setCreating] = useState(false);
   const [teamMetadata, setTeamMetadata] = useState<unknown>(null);
   const [queueSummaryByTeam, setQueueSummaryByTeam] = useState<Record<string, QueueSummary>>({});
+  const [boardCountByTeam, setBoardCountByTeam] = useState<Record<string, number>>({});
   const navigate = useNavigate();
   const { hosts, activeHostId, switchHost } = useBridge();
   const { t } = useTranslation();
@@ -119,15 +119,24 @@ export function TeamsRoute() {
       rpc('team.run.list').catch(() => ({ ok: false } as RpcResponse)),
       rpc('model.resources.status').catch(() => ({ ok: false } as RpcResponse)),
     ]);
+    const boardResponses = await Promise.all(nextTeams.map((team) => (
+      rpc('team.board.items.list', { teamId: team.id }).catch(() => ({ ok: false } as RpcResponse))
+    )));
     const queueData = normalizeQueueData(responses, teamNames);
     const nextSummary: Record<string, QueueSummary> = {};
+    const nextBoardCount: Record<string, number> = {};
     for (const team of nextTeams) {
       const summary = summaryForTeam([...queueData.items, ...queueData.resources], team.id);
       if (summary.taskCount || summary.runningCount || summary.queuedCount || summary.waitingCount) {
         nextSummary[team.id] = summary;
       }
     }
+    boardResponses.forEach((response, index) => {
+      if (!response.ok) return;
+      nextBoardCount[nextTeams[index].id] = normalizeBoardItems(response).length;
+    });
     setQueueSummaryByTeam(nextSummary);
+    setBoardCountByTeam(nextBoardCount);
   };
 
   const refreshMetadata = async () => {
@@ -334,9 +343,11 @@ export function TeamsRoute() {
 
         {/* Team Cards */}
         {teams.map((team) => {
-          const done = team.tasksDone ?? 0;
-          const total = team.tasksTotal ?? 0;
           const queueSummary = queueSummaryByTeam[team.id];
+          const boardCount = boardCountByTeam[team.id];
+          const boardSubtitle = typeof boardCount === 'number'
+            ? ` · ${boardCount} board item${boardCount !== 1 ? 's' : ''}`
+            : '';
           const queueSubtitle = queueSummary
             ? ` · ${queueSummary.taskCount} queued-task${queueSummary.taskCount !== 1 ? 's' : ''} · ${queueSummary.runningCount} running · ${queueSummary.queuedCount} queued · ${queueSummary.waitingCount} waiting`
             : '';
@@ -345,12 +356,12 @@ export function TeamsRoute() {
             <ListItem
               key={team.id}
               title={team.name}
-              subtitle={`${team.workingDirectory} · ${team.members.length} member${team.members.length !== 1 ? 's' : ''}${queueSubtitle}`}
+              subtitle={`${team.workingDirectory} · ${team.members.length} member${team.members.length !== 1 ? 's' : ''}${boardSubtitle}${queueSubtitle}`}
               leading={
                 <Badge variant="neutral">{team.members.length}</Badge>
               }
               trailing={
-                <span className="data-mono text-text-dim">{done}/{total}</span>
+                <span className="data-mono text-text-dim">{typeof boardCount === 'number' ? `${boardCount} board` : 'board'}</span>
               }
               onPress={() => navigate(`/team?id=${team.id}`)}
               onDelete={() => handleDelete(team.id)}
