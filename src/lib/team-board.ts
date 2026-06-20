@@ -44,6 +44,27 @@ export interface TeamBoardItem {
 type AnyRecord = Record<string, unknown>;
 
 const BOARD_ITEM_KEYS = ['items', 'boardItems', 'teamBoardItems', 'teamBoard', 'board'];
+const BOARD_EXECUTION_STATUS_ALIASES: Record<string, BoardExecutionStatus | 'waiting'> = {
+  todo: 'draft',
+  open: 'draft',
+  queued: 'queued',
+  pending: 'queued',
+  waiting: 'waiting',
+  waiting_for_slot: 'waiting_for_team_slot',
+  waiting_for_team_slot: 'waiting_for_team_slot',
+  waiting_for_model: 'waiting_for_model',
+  running: 'running',
+  in_progress: 'running',
+  completed: 'completed',
+  complete: 'completed',
+  done: 'completed',
+  failed: 'failed',
+  error: 'failed',
+  cancelled: 'cancelled',
+  canceled: 'cancelled',
+  interrupted: 'interrupted',
+  blocked: 'blocked',
+};
 
 function isRecord(value: unknown): value is AnyRecord {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -72,6 +93,12 @@ function readStringArray(record: AnyRecord, keys: string[]): string[] {
   return [];
 }
 
+export function normalizeBoardExecutionStatus(value: unknown): BoardExecutionStatus | 'waiting' {
+  const status = toText(value)?.toLowerCase().replace(/[\s-]+/g, '_');
+  if (!status) return 'draft';
+  return BOARD_EXECUTION_STATUS_ALIASES[status] ?? (status as BoardExecutionStatus | 'waiting');
+}
+
 function collectRecords(value: unknown, keys: string[], depth = 0): unknown[] {
   if (depth > 4 || !isRecord(value)) return [];
   const found: unknown[] = [];
@@ -93,7 +120,7 @@ function normalizeBoardItem(value: unknown): TeamBoardItem | null {
     title: readText(value, ['title', 'subject', 'name']) ?? id,
     description: readText(value, ['description', 'body', 'details']),
     source: readText(value, ['source']),
-    executionStatus: readText(value, ['executionStatus', 'execution_status']) ?? 'draft',
+    executionStatus: normalizeBoardExecutionStatus(readText(value, ['executionStatus', 'execution_status'])),
     reviewStatus: readText(value, ['reviewStatus', 'review_status']) ?? 'not_required',
     assignedMembers: readStringArray(value, ['assignedMembers', 'assigned_members', 'assignees', 'owners']),
     reviewerMembers: readStringArray(value, ['reviewerMembers', 'reviewer_members', 'reviewers']),

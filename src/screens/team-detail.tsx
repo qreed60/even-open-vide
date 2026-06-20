@@ -5,7 +5,7 @@ import { IcEditAdd, IcEditChecklist, IcEditEdit, IcEditTrash, IcFeatLearnExplore
 import { rpc } from '../domain/daemon-client';
 import { usePullRefresh } from '../hooks/use-pull-refresh';
 import { UNTITLED_DIALOG_CLASS } from '../lib/dialog';
-import { normalizeBoardItems, type TeamBoardItem, type BoardReviewStatus } from '../lib/team-board';
+import { normalizeBoardExecutionStatus, normalizeBoardItems, type TeamBoardItem, type BoardReviewStatus } from '../lib/team-board';
 import { isProviderSelectable, providerCapabilityHint, providerOptionsFromMetadata, roleOptionsFromMetadata, type TeamProviderCapability } from '../lib/team-metadata';
 import { TeamRunsPanel } from './team-runs';
 
@@ -48,8 +48,7 @@ interface TeamPlanSummary {
 const BOARD_EXECUTION_STATUSES = [
   'draft',
   'queued',
-  'waiting_for_team_slot',
-  'waiting_for_model',
+  'waiting',
   'running',
   'completed',
   'failed',
@@ -59,10 +58,14 @@ const BOARD_EXECUTION_STATUSES = [
 ];
 
 const BOARD_REVIEW_STATUSES: BoardReviewStatus[] = ['pending_review', 'approved', 'revise', 'rejected'];
+const WAITING_EXECUTION_STATUSES = new Set(['waiting', 'waiting_for_team_slot', 'waiting_for_model']);
+const LEGACY_TASK_ID_PREFIX = 'task_';
+const BOARD_ITEM_ID_PREFIX = 'board_item_';
 
 const boardDotColor: Record<string, string> = {
   draft: 'bg-text-dim',
   queued: 'bg-[#4285F4]',
+  waiting: 'bg-accent-warning',
   waiting_for_team_slot: 'bg-accent-warning',
   waiting_for_model: 'bg-accent-warning',
   running: 'bg-positive',
@@ -95,6 +98,18 @@ let memberDraftIdCounter = 0;
 function createMemberDraftId(): string {
   memberDraftIdCounter += 1;
   return `member-${Date.now().toString(36)}-${memberDraftIdCounter}`;
+}
+
+function boardExecutionGroup(status: string): string {
+  if (WAITING_EXECUTION_STATUSES.has(status)) return 'waiting';
+  return BOARD_EXECUTION_STATUSES.includes(status) ? status : 'other';
+}
+
+function primaryBoardDebugId(item: TeamBoardItem): string | undefined {
+  if (item.queueTaskId) return item.queueTaskId;
+  if (item.id.startsWith(BOARD_ITEM_ID_PREFIX)) return item.id;
+  if (!item.id.startsWith(LEGACY_TASK_ID_PREFIX)) return item.id;
+  return undefined;
 }
 
 export function TeamDetailRoute() {
@@ -335,8 +350,10 @@ export function TeamDetailRoute() {
   for (const status of BOARD_EXECUTION_STATUSES) grouped[status] = [];
   const otherBoardItems: TeamBoardItem[] = [];
   for (const item of boardItems) {
-    if (grouped[item.executionStatus]) {
-      grouped[item.executionStatus].push(item);
+    const executionStatus = normalizeBoardExecutionStatus(item.executionStatus);
+    const group = boardExecutionGroup(executionStatus);
+    if (grouped[group]) {
+      grouped[group].push(item);
     } else {
       otherBoardItems.push(item);
     }
@@ -440,7 +457,8 @@ export function TeamDetailRoute() {
                       </div>
 
                       {statusItems.map((item) => {
-                        const canCancel = !['completed', 'failed', 'cancelled'].includes(item.executionStatus);
+                        const executionStatus = normalizeBoardExecutionStatus(item.executionStatus);
+                        const canCancel = !['completed', 'failed', 'cancelled'].includes(executionStatus);
                         const reviewVariant = item.reviewStatus === 'approved'
                           ? 'positive'
                           : item.reviewStatus === 'rejected' || item.reviewStatus === 'revise'
@@ -448,17 +466,20 @@ export function TeamDetailRoute() {
                             : item.reviewStatus === 'pending_review'
                               ? 'accent'
                               : 'neutral';
-                        const executionVariant = item.executionStatus === 'completed'
+                        const executionVariant = executionStatus === 'completed'
                           ? 'positive'
-                          : ['failed', 'blocked'].includes(item.executionStatus)
+                          : ['failed', 'blocked'].includes(executionStatus)
                             ? 'negative'
-                            : ['queued', 'waiting_for_team_slot', 'waiting_for_model', 'running'].includes(item.executionStatus)
+                            : ['queued', 'waiting', 'waiting_for_team_slot', 'waiting_for_model', 'running'].includes(executionStatus)
                               ? 'accent'
                               : 'neutral';
+                        const primaryDebugId = primaryBoardDebugId(item);
+                        const legacyTaskId = item.id.startsWith(LEGACY_TASK_ID_PREFIX) ? item.id : null;
                         const queueMeta = [
                           item.queueTaskId ? `queue task ${item.queueTaskId}` : null,
                           item.queueRunIds.length ? `runs ${item.queueRunIds.join(', ')}` : null,
                           item.priority ? `priority ${item.priority}` : null,
+                          legacyTaskId ? `legacy task ${legacyTaskId}` : null,
                         ].filter(Boolean);
                         const memberMeta = [
                           item.assignedMembers.length ? `assigned ${item.assignedMembers.join(', ')}` : null,
@@ -470,11 +491,11 @@ export function TeamDetailRoute() {
                               <div className="min-w-0">
                                 <p className="text-[13px] tracking-[-0.13px] text-text font-normal truncate">{item.title}</p>
                                 <div className="mt-1.5 flex flex-wrap gap-1">
-                                  <Badge variant={executionVariant}>{item.executionStatus}</Badge>
+                                  <Badge variant={executionVariant}>{executionStatus}</Badge>
                                   <Badge variant={reviewVariant}>{item.reviewStatus}</Badge>
                                 </div>
                               </div>
-                              <span className="data-mono shrink-0 text-text-dim">{item.id}</span>
+                              {primaryDebugId && <span className="data-mono shrink-0 text-text-dim">{primaryDebugId}</span>}
                             </div>
                             {item.description && (
                               <p className="text-[11px] tracking-[-0.11px] text-text-dim mt-2 line-clamp-3">{item.description}</p>
