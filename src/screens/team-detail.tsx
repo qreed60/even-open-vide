@@ -1,19 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useSearchParams, useNavigate } from 'react-router';
 import { Card, Button, Badge, EmptyState, Input, Select, Dialog, MultiSelect, Textarea, ListItem } from 'even-toolkit/web';
-import { IcEditAdd, IcEditChecklist, IcEditEdit, IcEditTrash, IcFeatLearnExplore } from 'even-toolkit/web/icons/svg-icons';
-import { ProviderBadge } from '../components/chat/provider-badge';
+import { IcEditAdd, IcEditChecklist, IcEditEdit, IcEditTrash, IcFeatLearnExplore, IcStatusAlert } from 'even-toolkit/web/icons/svg-icons';
 import { rpc } from '../domain/daemon-client';
 import { usePullRefresh } from '../hooks/use-pull-refresh';
 import { UNTITLED_DIALOG_CLASS } from '../lib/dialog';
-
-interface TeamTaskSummary {
-  id: string;
-  subject: string;
-  owner: string;
-  ownerTool?: string;
-  status: string;
-}
+import { BOARD_EXECUTION_GROUP_ORDER, groupBoardItemsByExecutionStatus, normalizeBoardExecutionStatus, normalizeBoardItems, type BoardExecutionGroup, type TeamBoardItem, type BoardReviewStatus } from '../lib/team-board';
+import { isProviderSelectable, providerCapabilityHint, providerOptionsFromMetadata, roleOptionsFromMetadata, type TeamProviderCapability } from '../lib/team-metadata';
+import { TeamRunsPanel } from './team-runs';
 
 interface TeamMemberOption {
   value: string;
@@ -24,6 +18,8 @@ interface TeamMemberDraft {
   name: string;
   tool: string;
   role: string;
+  model?: string;
+  draftId: string;
 }
 
 interface TeamPlanVote {
@@ -49,14 +45,19 @@ interface TeamPlanSummary {
   }>;
 }
 
-const STATUS_COLUMNS = ['TODO', 'IN PROGRESS', 'DONE', 'REVIEW', 'APPROVED'];
+const BOARD_REVIEW_STATUSES: BoardReviewStatus[] = ['pending_review', 'approved', 'revise', 'rejected'];
 
-const colDotColor: Record<string, string> = {
-  'TODO': 'bg-text-dim',
-  'IN PROGRESS': 'bg-accent-warning',
-  'DONE': 'bg-positive',
-  'REVIEW': 'bg-[#4285F4]',
-  'APPROVED': 'bg-positive',
+const boardDotColor: Record<BoardExecutionGroup, string> = {
+  draft: 'bg-text-dim',
+  queued: 'bg-[#4285F4]',
+  waiting: 'bg-accent-warning',
+  running: 'bg-positive',
+  completed: 'bg-positive',
+  failed: 'bg-negative',
+  cancelled: 'bg-text-dim',
+  interrupted: 'bg-accent-warning',
+  blocked: 'bg-negative',
+  other: 'bg-text-dim',
 };
 
 const PLAN_MODE_OPTIONS = [
@@ -74,27 +75,24 @@ const PLAN_MAX_ITERATION_OPTIONS = [
   { value: '10', label: '10 rounds' },
 ];
 
-const TEAM_TOOL_OPTIONS = [
-  { value: 'claude', label: 'Claude' },
-  { value: 'codex', label: 'Codex' },
-];
+type TabId = 'board' | 'plan' | 'chat' | 'runs';
 
-const TEAM_ROLE_OPTIONS = [
-  { value: 'lead', label: 'Lead' },
-  { value: 'planner', label: 'Planner' },
-  { value: 'coder', label: 'Coder' },
-  { value: 'reviewer', label: 'Reviewer' },
-];
+let memberDraftIdCounter = 0;
 
-type TabId = 'board' | 'plan' | 'chat';
+function createMemberDraftId(): string {
+  memberDraftIdCounter += 1;
+  return `member-${Date.now().toString(36)}-${memberDraftIdCounter}`;
+}
 
 export function TeamDetailRoute() {
   const [params] = useSearchParams();
   const teamId = params.get('id') ?? '';
   const navigate = useNavigate();
-  const [tasks, setTasks] = useState<TeamTaskSummary[]>([]);
+  const [boardItems, setBoardItems] = useState<TeamBoardItem[]>([]);
+  const [boardUnsupported, setBoardUnsupported] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [movingId, setMovingId] = useState<string | null>(null);
+  const [cancellingId, setCancellingId] = useState<string | null>(null);
+  const [updatingReviewId, setUpdatingReviewId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TabId>('board');
   const [newSubject, setNewSubject] = useState('');
   const [newOwners, setNewOwners] = useState<string[]>([]);
@@ -105,6 +103,7 @@ export function TeamDetailRoute() {
   const [teamName, setTeamName] = useState('Team');
   const [teamCwd, setTeamCwd] = useState('');
   const [teamMemberDrafts, setTeamMemberDrafts] = useState<TeamMemberDraft[]>([]);
+  const [teamMetadata, setTeamMetadata] = useState<unknown>(null);
   const [showTeamForm, setShowTeamForm] = useState(false);
   const [savingTeam, setSavingTeam] = useState(false);
 
@@ -120,7 +119,7 @@ export function TeamDetailRoute() {
     try {
       const res = await rpc('team.get', { teamId });
       if (res.ok && res.team) {
-        const team = res.team as { name?: string; workingDirectory?: string; members?: { name: string; tool: string; role: string }[] };
+        const team = res.team as { name?: string; workingDirectory?: string; members?: { name: string; tool: string; role: string; model?: string }[] };
         setTeamName(team.name ?? 'Team');
         setTeamCwd(team.workingDirectory ?? '');
         if (team.members) {
@@ -132,6 +131,8 @@ export function TeamDetailRoute() {
             name: member.name,
             tool: member.tool,
             role: member.role,
+            model: member.model,
+            draftId: createMemberDraftId(),
           })));
         }
       }
@@ -140,14 +141,19 @@ export function TeamDetailRoute() {
     }
   };
 
-  const refreshTasks = async () => {
+  const refreshBoardItems = async () => {
     try {
-      const res = await rpc('team.task.list', { teamId });
-      if (res.ok && Array.isArray(res.teamTasks)) {
-        setTasks(res.teamTasks as TeamTaskSummary[]);
+      const res = await rpc('team.board.items.list', { teamId });
+      if (res.ok) {
+        setBoardItems(normalizeBoardItems(res));
+        setBoardUnsupported(false);
+      } else {
+        setBoardItems([]);
+        setBoardUnsupported(true);
       }
     } catch {
-      // Ignore task refresh errors.
+      setBoardItems([]);
+      setBoardUnsupported(true);
     }
   };
 
@@ -164,8 +170,17 @@ export function TeamDetailRoute() {
     }
   };
 
+  const refreshMetadata = async () => {
+    try {
+      const res = await rpc('team.metadata');
+      if (res.ok) setTeamMetadata(res);
+    } catch {
+      // Older daemons do not expose metadata.
+    }
+  };
+
   const refresh = async () => {
-    await Promise.all([refreshTeam(), refreshTasks(), refreshPlan()]);
+    await Promise.all([refreshTeam(), refreshBoardItems(), refreshPlan(), refreshMetadata()]);
     setLoading(false);
   };
 
@@ -177,7 +192,7 @@ export function TeamDetailRoute() {
   useEffect(() => {
     if (!teamId) return;
     const timer = setInterval(() => {
-      void refreshTasks();
+      void refreshBoardItems();
       if (activeTab === 'plan') {
         void refreshPlan();
       }
@@ -187,36 +202,47 @@ export function TeamDetailRoute() {
 
   const { pullHandlers, PullIndicator } = usePullRefresh(refresh);
 
-  const handleMove = async (taskId: string, newStatus: string) => {
-    setMovingId(taskId);
-    try {
-      await rpc('team.task.update', { teamId, taskId, status: newStatus.toLowerCase().replace(/\s+/g, '_') });
-      await refreshTasks();
-    } catch {
-      // Ignore move failures and keep the board visible.
-    }
-    setMovingId(null);
-  };
-
   const handleAddTask = async () => {
     if (!newSubject.trim()) return;
     setAddingTask(true);
     try {
-      await rpc('team.task.create', {
+      await rpc('team.board.item.create', {
         teamId,
-        subject: newSubject.trim(),
+        title: newSubject.trim(),
         description: newDesc.trim(),
-        owner: newOwners[0] || undefined,
+        assignedMembers: newOwners,
       });
       setNewSubject('');
       setNewOwners([]);
       setNewDesc('');
       setShowAddForm(false);
-      await refreshTasks();
+      await refreshBoardItems();
     } catch {
       // Keep the dialog open so the user can retry.
     }
     setAddingTask(false);
+  };
+
+  const handleCancelBoardItem = async (itemId: string) => {
+    setCancellingId(itemId);
+    try {
+      await rpc('team.board.item.cancel', { teamId, itemId });
+      await refreshBoardItems();
+    } catch {
+      // Keep the board visible when an older bridge lacks cancellation.
+    }
+    setCancellingId(null);
+  };
+
+  const handleSetReviewStatus = async (itemId: string, reviewStatus: BoardReviewStatus) => {
+    setUpdatingReviewId(itemId);
+    try {
+      await rpc('team.board.item.set_review_status', { teamId, itemId, reviewStatus });
+      await refreshBoardItems();
+    } catch {
+      // Review controls are best-effort on bridges that expose the command.
+    }
+    setUpdatingReviewId(null);
   };
 
   const handleGeneratePlan = async () => {
@@ -240,7 +266,7 @@ export function TeamDetailRoute() {
   };
 
   const addTeamMember = () => {
-    setTeamMemberDrafts((current) => [...current, { name: '', tool: 'codex', role: 'coder' }]);
+    setTeamMemberDrafts((current) => [...current, { name: '', tool: 'codex', role: 'coder', draftId: createMemberDraftId() }]);
   };
 
   const updateTeamMember = (index: number, field: keyof TeamMemberDraft, value: string) => {
@@ -264,7 +290,12 @@ export function TeamDetailRoute() {
         teamId,
         name: teamName.trim(),
         cwd: teamCwd.trim(),
-        members,
+        members: members.map((member) => ({
+          name: member.name,
+          tool: member.tool,
+          role: member.role,
+          model: member.model?.trim() || undefined,
+        })),
       });
       if (res.ok) {
         setShowTeamForm(false);
@@ -287,19 +318,22 @@ export function TeamDetailRoute() {
     setDeletingPlanId(null);
   };
 
-  const grouped: Record<string, TeamTaskSummary[]> = {};
-  for (const col of STATUS_COLUMNS) grouped[col] = [];
-  for (const task of tasks) {
-    const key = task.status.toUpperCase().replace(/_/g, ' ');
-    if (grouped[key]) grouped[key].push(task);
-  }
+  const groupedBoardItems = useMemo(() => groupBoardItemsByExecutionStatus(boardItems), [boardItems]);
+  const boardSections = useMemo(() => (
+    [...BOARD_EXECUTION_GROUP_ORDER, ...(groupedBoardItems.other.length ? ['other' as const] : [])]
+      .map((status) => ({ status, items: groupedBoardItems[status] }))
+  ), [groupedBoardItems]);
 
   const latestRevision = useMemo(() => latestPlan?.revisions?.[latestPlan.revisions.length - 1] ?? null, [latestPlan]);
+  const teamToolOptions = providerOptionsFromMetadata(teamMetadata);
+  const teamRoleOptions = roleOptionsFromMetadata(teamMetadata);
+  const teamProvidersByValue = new Map<string, TeamProviderCapability>(teamToolOptions.map((provider) => [provider.value, provider]));
 
   const tabs: { id: TabId; label: string }[] = [
     { id: 'board', label: 'Board' },
     { id: 'plan', label: 'Plan' },
     { id: 'chat', label: 'Chat' },
+    { id: 'runs', label: 'Runs' },
   ];
 
   return (
@@ -313,7 +347,7 @@ export function TeamDetailRoute() {
               <p className="text-[11px] tracking-[-0.11px] text-text-dim mt-1 break-all">{teamCwd}</p>
             </div>
             <div className="flex shrink-0 flex-col items-end gap-1.5">
-              <span className="text-[11px] tracking-[-0.11px] text-text-dim">{tasks.length} task{tasks.length !== 1 ? 's' : ''}</span>
+              <span className="text-[11px] tracking-[-0.11px] text-text-dim">{boardItems.length} board item{boardItems.length !== 1 ? 's' : ''}</span>
               <Button size="sm" onClick={() => setShowTeamForm(true)}>
                 <IcEditEdit width={16} height={16} />
               </Button>
@@ -321,7 +355,7 @@ export function TeamDetailRoute() {
           </div>
           <div className="mt-3 flex flex-wrap gap-1.5">
             {teamMemberDrafts.map((member) => (
-              <Badge key={`${member.name}-${member.role}`} variant="neutral">
+              <Badge key={member.draftId} variant="neutral">
                 {member.name} · {member.role}
               </Badge>
             ))}
@@ -356,49 +390,103 @@ export function TeamDetailRoute() {
               <p className="text-[13px] tracking-[-0.13px] text-text-dim text-center py-6 status-breathe-fast">Loading...</p>
             )}
 
-            {!loading && tasks.length === 0 && (
+            {!loading && boardUnsupported && (
               <EmptyState
-                icon={<IcEditChecklist width={32} height={32} />}
-                title="No tasks"
-                description="This team has no tasks yet."
+                icon={<IcStatusAlert width={32} height={32} />}
+                title="Board unavailable"
+                description="This bridge does not expose queue-backed Board commands yet."
               />
             )}
 
-            {!loading && tasks.length > 0 && (
+            {!loading && !boardUnsupported && boardItems.length === 0 && (
+              <EmptyState
+                icon={<IcEditChecklist width={32} height={32} />}
+                title="No board items"
+                description="This team has no queue-backed Board items yet."
+              />
+            )}
+
+            {!loading && !boardUnsupported && boardItems.length > 0 && (
               <div className="flex gap-3 overflow-x-auto pb-4">
-                {STATUS_COLUMNS.map((col) => {
-                  const colTasks = grouped[col] ?? [];
+                {boardSections.map(({ status, items: statusItems }) => {
                   return (
-                    <div key={col} className="kanban-col flex flex-col gap-1.5">
+                    <div key={status} className="kanban-col flex flex-col gap-1.5">
                       <div className="kanban-col-header">
-                        <span className={`kanban-col-dot ${colDotColor[col] ?? 'bg-text-dim'}`} />
+                        <span className={`kanban-col-dot ${boardDotColor[status] ?? 'bg-text-dim'}`} />
                         <span className="text-[11px] tracking-[-0.11px] font-normal text-text-dim uppercase">
-                          {col}
+                          {status.replace(/_/g, ' ')}
                         </span>
-                        <span className="data-mono ml-auto">{colTasks.length}</span>
+                        <span className="data-mono ml-auto">{statusItems.length}</span>
                       </div>
 
-                      {colTasks.map((task) => {
-                        const nextIdx = STATUS_COLUMNS.indexOf(col) + 1;
-                        const nextStatus = nextIdx < STATUS_COLUMNS.length ? STATUS_COLUMNS[nextIdx] : null;
+                      {statusItems.map((item) => {
+                        const executionStatus = normalizeBoardExecutionStatus(item.executionStatus);
+                        const canCancel = !['completed', 'failed', 'cancelled'].includes(executionStatus);
+                        const reviewVariant = item.reviewStatus === 'approved'
+                          ? 'positive'
+                          : item.reviewStatus === 'rejected' || item.reviewStatus === 'revise'
+                            ? 'negative'
+                            : item.reviewStatus === 'pending_review'
+                              ? 'accent'
+                              : 'neutral';
+                        const executionVariant = executionStatus === 'completed'
+                          ? 'positive'
+                          : ['failed', 'blocked'].includes(executionStatus)
+                            ? 'negative'
+                            : ['queued', 'waiting', 'waiting_for_team_slot', 'waiting_for_model', 'running'].includes(executionStatus)
+                              ? 'accent'
+                              : 'neutral';
+                        const queueMeta = [
+                          item.source,
+                          item.priority ? `priority ${item.priority}` : null,
+                        ].filter(Boolean);
+                        const memberMeta = [
+                          item.assignedMembers.length ? `assigned ${item.assignedMembers.join(', ')}` : null,
+                          item.reviewerMembers.length ? `reviewers ${item.reviewerMembers.join(', ')}` : null,
+                        ].filter(Boolean);
                         return (
-                          <Card key={task.id} className="card-hover">
-                            <p className="text-[13px] tracking-[-0.13px] text-text font-normal truncate">{task.subject}</p>
-                            {task.owner && (
-                              <div className="flex items-center gap-1.5 mt-1.5">
-                                <ProviderBadge provider={(task.ownerTool || 'claude') as 'claude' | 'codex' | 'gemini'} size={18} />
-                                <span className="data-mono">@{task.owner}</span>
+                          <Card key={item.id} className="card-hover">
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="min-w-0">
+                                <p className="text-[13px] tracking-[-0.13px] text-text font-normal truncate">{item.title}</p>
+                                <div className="mt-1.5 flex flex-wrap gap-1">
+                                  <Badge variant={executionVariant}>{executionStatus}</Badge>
+                                  <Badge variant={reviewVariant}>{item.reviewStatus}</Badge>
+                                </div>
                               </div>
+                            </div>
+                            {(item.excerpt || item.description) && (
+                              <p className="text-[11px] tracking-[-0.11px] text-text-dim mt-2 line-clamp-3">{item.excerpt ?? item.description}</p>
                             )}
-                            {nextStatus && (
+                            {memberMeta.length > 0 && <p className="data-mono mt-2">{memberMeta.join(' · ')}</p>}
+                            {queueMeta.length > 0 && <p className="data-mono mt-1 text-text-dim">{queueMeta.join(' · ')}</p>}
+                            {(item.blockedReason || item.reviewFeedback) && (
+                              <p className="text-[11px] tracking-[-0.11px] text-text-dim mt-2">
+                                {[item.blockedReason ? `Blocked: ${item.blockedReason}` : null, item.reviewFeedback ? `Review: ${item.reviewFeedback}` : null].filter(Boolean).join(' · ')}
+                              </p>
+                            )}
+                            <div className="mt-2 flex flex-wrap gap-1">
+                              {BOARD_REVIEW_STATUSES.map((reviewStatus) => (
+                                <Button
+                                  key={reviewStatus}
+                                  variant={item.reviewStatus === reviewStatus ? 'default' : 'ghost'}
+                                  size="sm"
+                                  onClick={() => handleSetReviewStatus(item.id, reviewStatus)}
+                                  disabled={updatingReviewId === item.id}
+                                >
+                                  {reviewStatus.replace(/_/g, ' ')}
+                                </Button>
+                              ))}
+                            </div>
+                            {canCancel && (
                               <Button
-                                variant="default"
+                                variant="ghost"
                                 size="sm"
                                 className="mt-2 w-full"
-                                onClick={() => handleMove(task.id, nextStatus)}
-                                disabled={movingId === task.id}
+                                onClick={() => handleCancelBoardItem(item.id)}
+                                disabled={cancellingId === item.id}
                               >
-                                {movingId === task.id ? '...' : `\u2192 ${nextStatus}`}
+                                {cancellingId === item.id ? 'Cancelling...' : 'Cancel'}
                               </Button>
                             )}
                           </Card>
@@ -421,7 +509,7 @@ export function TeamDetailRoute() {
             <Dialog open={showAddForm} onClose={() => setShowAddForm(false)} title="New Task">
               <div className="flex flex-col gap-3">
                 <div className="flex flex-col gap-1">
-                  <span className="text-[11px] tracking-[-0.11px] text-text-dim font-normal">Subject</span>
+                  <span className="text-[11px] tracking-[-0.11px] text-text-dim font-normal">Title</span>
                   <Input placeholder="Fix the auth bug" value={newSubject} onChange={(e) => setNewSubject(e.target.value)} />
                 </div>
                 <div className="flex flex-col gap-1">
@@ -464,7 +552,7 @@ export function TeamDetailRoute() {
                     </Button>
                   </div>
                   {teamMemberDrafts.map((member, index) => (
-                    <div key={`${index}-${member.name}`} className="bg-surface-light rounded-[6px] p-2.5 flex flex-col gap-2">
+                    <div key={member.draftId} className="bg-surface-light rounded-[6px] p-2.5 flex flex-col gap-2">
                       <div className="flex gap-1.5 items-end">
                         <div className="flex-1 flex flex-col gap-0.5">
                           <span className="text-[11px] tracking-[-0.11px] text-text-dim font-normal">Name</span>
@@ -483,12 +571,23 @@ export function TeamDetailRoute() {
                       <div className="flex gap-1.5">
                         <div className="flex-1 flex flex-col gap-0.5">
                           <span className="text-[11px] tracking-[-0.11px] text-text-dim font-normal">Tool</span>
-                          <Select value={member.tool} options={TEAM_TOOL_OPTIONS} onValueChange={(value) => updateTeamMember(index, 'tool', value)} />
+                          <Select
+                            value={member.tool}
+                            options={teamToolOptions}
+                            onValueChange={(value) => {
+                              if (isProviderSelectable(teamProvidersByValue.get(value))) updateTeamMember(index, 'tool', value);
+                            }}
+                          />
                         </div>
                         <div className="flex-1 flex flex-col gap-0.5">
                           <span className="text-[11px] tracking-[-0.11px] text-text-dim font-normal">Role</span>
-                          <Select value={member.role} options={TEAM_ROLE_OPTIONS} onValueChange={(value) => updateTeamMember(index, 'role', value)} />
+                          <Select value={member.role} options={teamRoleOptions} onValueChange={(value) => updateTeamMember(index, 'role', value)} />
                         </div>
+                      </div>
+                      <div className="flex flex-col gap-0.5">
+                        <span className="text-[11px] tracking-[-0.11px] text-text-dim font-normal">Model Override</span>
+                        <Input placeholder="Default" value={member.model ?? ''} onChange={(e) => updateTeamMember(index, 'model', e.target.value)} />
+                        <span className="text-[10px] tracking-[-0.1px] text-text-dim">{providerCapabilityHint(teamProvidersByValue.get(member.tool))}</span>
                       </div>
                     </div>
                   ))}
@@ -613,6 +712,10 @@ export function TeamDetailRoute() {
               </div>
             </Dialog>
           </div>
+        )}
+
+        {activeTab === 'runs' && (
+          <TeamRunsPanel teamId={teamId} teamName={teamName} embedded />
         )}
       </div>
     </div>

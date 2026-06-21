@@ -3,17 +3,23 @@ import { Card, Badge, Button, Input, Select, EmptyState, ListItem, Dialog, useDr
 import { IcEditAdd, IcFeatAccount, IcStatusFile, IcEditTrash } from 'even-toolkit/web/icons/svg-icons';
 import { useNavigate } from 'react-router';
 import { rpc } from '../domain/daemon-client';
+import type { RpcResponse } from '../domain/daemon-client';
 import { usePullRefresh } from '../hooks/use-pull-refresh';
 import { consumePickedLocation, useDialogDraft } from '../hooks/use-dialog-draft';
 import { useBridge } from '../contexts/bridge';
 import { getHostOptions, resolvePreferredHostId } from '../lib/bridge-hosts';
 import { UNTITLED_DIALOG_CLASS } from '../lib/dialog';
 import { useTranslation } from '../hooks/useTranslation';
+import { isProviderSelectable, providerCapabilityHint, providerOptionsFromMetadata, roleOptionsFromMetadata, type TeamProviderCapability } from '../lib/team-metadata';
+import { normalizeQueueData, summaryForTeam, type QueueSummary } from '../lib/team-queue';
+import { normalizeBoardItems } from '../lib/team-board';
 
 interface TeamMember {
   name: string;
   tool: string;
   role: string;
+  model?: string;
+  draftId?: string;
 }
 
 interface TeamInfo {
@@ -22,28 +28,31 @@ interface TeamInfo {
   workingDirectory: string;
   members: TeamMember[];
   createdAt: string;
-  tasksDone?: number;
-  tasksTotal?: number;
 }
 
-const TOOLS = [
-  { value: 'claude', label: 'Claude' },
-  { value: 'codex', label: 'Codex' },
-];
+let memberDraftIdCounter = 0;
 
-const ROLES = [
-  { value: 'lead', label: 'Lead' },
-  { value: 'coder', label: 'Coder' },
-  { value: 'reviewer', label: 'Reviewer' },
-  { value: 'planner', label: 'Planner' },
-];
+function createMemberDraftId(): string {
+  memberDraftIdCounter += 1;
+  return `member-${Date.now().toString(36)}-${memberDraftIdCounter}`;
+}
+
+function ensureMemberDraftIds(members: TeamMember[]): TeamMember[] {
+  let changed = false;
+  const nextMembers = members.map((member) => {
+    if (member.draftId) return member;
+    changed = true;
+    return { ...member, draftId: createMemberDraftId() };
+  });
+  return changed ? nextMembers : members;
+}
 
 const EMPTY_TEAM_DRAFT = {
   teamName: '',
   teamCwd: '',
   hostId: '',
   members: [
-    { name: '', tool: 'claude', role: 'lead' },
+    { name: '', tool: 'claude', role: 'lead', draftId: createMemberDraftId() },
   ] as TeamMember[],
 };
 
@@ -52,6 +61,9 @@ export function TeamsRoute() {
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [teamMetadata, setTeamMetadata] = useState<unknown>(null);
+  const [queueSummaryByTeam, setQueueSummaryByTeam] = useState<Record<string, QueueSummary>>({});
+  const [boardCountByTeam, setBoardCountByTeam] = useState<Record<string, number>>({});
   const navigate = useNavigate();
   const { hosts, activeHostId, switchHost } = useBridge();
   const { t } = useTranslation();
@@ -80,24 +92,68 @@ export function TeamsRoute() {
     }
   }, [activeHostId, draft.hostId, hosts, setDraft, showForm]);
 
+  useEffect(() => {
+    setDraft((current) => {
+      const nextMembers = ensureMemberDraftIds(current.members);
+      return nextMembers === current.members ? current : { ...current, members: nextMembers };
+    });
+  }, [setDraft]);
+
   const refresh = async () => {
     try {
       const res = await rpc('team.list');
       if (res.ok && Array.isArray(res.teams)) {
-        setTeams(res.teams as TeamInfo[]);
+        const nextTeams = res.teams as TeamInfo[];
+        setTeams(nextTeams);
+        void refreshQueueSummary(nextTeams);
       }
     } catch { /* ignore */ }
     setLoading(false);
   };
 
-  useEffect(() => { void refresh(); }, [activeHostId]);
+  const refreshQueueSummary = async (nextTeams: TeamInfo[]) => {
+    const teamNames = new Map(nextTeams.map((team) => [team.id, team.name]));
+    const responses = await Promise.all([
+      rpc('global.queue.status').catch(() => ({ ok: false } as RpcResponse)),
+      rpc('team.queue.status').catch(() => ({ ok: false } as RpcResponse)),
+      rpc('team.run.list').catch(() => ({ ok: false } as RpcResponse)),
+      rpc('model.resources.status').catch(() => ({ ok: false } as RpcResponse)),
+    ]);
+    const boardResponses = await Promise.all(nextTeams.map((team) => (
+      rpc('team.board.items.list', { teamId: team.id }).catch(() => ({ ok: false } as RpcResponse))
+    )));
+    const queueData = normalizeQueueData(responses, teamNames);
+    const nextSummary: Record<string, QueueSummary> = {};
+    const nextBoardCount: Record<string, number> = {};
+    for (const team of nextTeams) {
+      const summary = summaryForTeam([...queueData.items, ...queueData.resources], team.id);
+      if (summary.taskCount || summary.runningCount || summary.queuedCount || summary.waitingCount) {
+        nextSummary[team.id] = summary;
+      }
+    }
+    boardResponses.forEach((response, index) => {
+      if (!response.ok) return;
+      nextBoardCount[nextTeams[index].id] = normalizeBoardItems(response).length;
+    });
+    setQueueSummaryByTeam(nextSummary);
+    setBoardCountByTeam(nextBoardCount);
+  };
+
+  const refreshMetadata = async () => {
+    try {
+      const res = await rpc('team.metadata');
+      if (res.ok) setTeamMetadata(res);
+    } catch { /* older daemons do not expose team.metadata */ }
+  };
+
+  useEffect(() => { void refresh(); void refreshMetadata(); }, [activeHostId]);
 
   const { pullHandlers, PullIndicator } = usePullRefresh(refresh);
 
   const addMember = () => {
     setDraft((current) => ({
       ...current,
-      members: [...current.members, { name: '', tool: 'claude', role: 'coder' }],
+      members: [...current.members, { name: '', tool: 'claude', role: 'coder', draftId: createMemberDraftId() }],
     }));
   };
 
@@ -131,7 +187,7 @@ export function TeamsRoute() {
       const res = await rpc('team.create', {
         name: teamName.trim(),
         cwd: teamCwd.trim(),
-        members: members.map((m) => ({ name: m.name.trim(), tool: m.tool, role: m.role })),
+        members: members.map((m) => ({ name: m.name.trim(), tool: m.tool, role: m.role, model: m.model?.trim() || undefined })),
       });
       if (res.ok) {
         handleCloseForm();
@@ -156,6 +212,9 @@ export function TeamsRoute() {
   });
 
   const hostOptions = getHostOptions(hosts);
+  const toolOptions = providerOptionsFromMetadata(teamMetadata);
+  const roleOptions = roleOptionsFromMetadata(teamMetadata);
+  const providersByValue = new Map<string, TeamProviderCapability>(toolOptions.map((provider) => [provider.value, provider]));
 
   return (
     <div className="flex-1 flex flex-col bg-bg">
@@ -216,7 +275,7 @@ export function TeamsRoute() {
               </div>
 
               {members.map((member, i) => (
-                <div key={i} className="bg-surface-light rounded-[6px] p-2.5 flex flex-col gap-2">
+                <div key={member.draftId ?? i} className="bg-surface-light rounded-[6px] p-2.5 flex flex-col gap-2">
                   {/* Row 1: Name (full width) */}
                   <div className="flex gap-1.5 items-end">
                     <div className="flex-1 flex flex-col gap-0.5">
@@ -237,12 +296,23 @@ export function TeamsRoute() {
                   <div className="flex gap-1.5">
                     <div className="flex-1 flex flex-col gap-0.5">
                       <span className="text-[11px] tracking-[-0.11px] text-text-dim font-normal">Tool</span>
-                      <Select value={member.tool} options={TOOLS} onValueChange={(v) => updateMember(i, 'tool', v)} />
+                      <Select
+                        value={member.tool}
+                        options={toolOptions}
+                        onValueChange={(v) => {
+                          if (isProviderSelectable(providersByValue.get(v))) updateMember(i, 'tool', v);
+                        }}
+                      />
                     </div>
                     <div className="flex-1 flex flex-col gap-0.5">
                       <span className="text-[11px] tracking-[-0.11px] text-text-dim font-normal">Role</span>
-                      <Select value={member.role} options={ROLES} onValueChange={(v) => updateMember(i, 'role', v)} />
+                      <Select value={member.role} options={roleOptions} onValueChange={(v) => updateMember(i, 'role', v)} />
                     </div>
+                  </div>
+                  <div className="flex flex-col gap-0.5">
+                    <span className="text-[11px] tracking-[-0.11px] text-text-dim font-normal">Model Override</span>
+                    <Input placeholder="Default" value={member.model ?? ''} onChange={(e) => updateMember(i, 'model', e.target.value)} />
+                    <span className="text-[10px] tracking-[-0.1px] text-text-dim">{providerCapabilityHint(providersByValue.get(member.tool))}</span>
                   </div>
                 </div>
               ))}
@@ -273,19 +343,25 @@ export function TeamsRoute() {
 
         {/* Team Cards */}
         {teams.map((team) => {
-          const done = team.tasksDone ?? 0;
-          const total = team.tasksTotal ?? 0;
+          const queueSummary = queueSummaryByTeam[team.id];
+          const boardCount = boardCountByTeam[team.id];
+          const boardSubtitle = typeof boardCount === 'number'
+            ? ` · ${boardCount} board item${boardCount !== 1 ? 's' : ''}`
+            : '';
+          const queueSubtitle = queueSummary
+            ? ` · ${queueSummary.taskCount} queued-task${queueSummary.taskCount !== 1 ? 's' : ''} · ${queueSummary.runningCount} running · ${queueSummary.queuedCount} queued · ${queueSummary.waitingCount} waiting`
+            : '';
 
           return (
             <ListItem
               key={team.id}
               title={team.name}
-              subtitle={`${team.workingDirectory} · ${team.members.length} member${team.members.length !== 1 ? 's' : ''}`}
+              subtitle={`${team.workingDirectory} · ${team.members.length} member${team.members.length !== 1 ? 's' : ''}${boardSubtitle}${queueSubtitle}`}
               leading={
                 <Badge variant="neutral">{team.members.length}</Badge>
               }
               trailing={
-                <span className="data-mono text-text-dim">{done}/{total}</span>
+                <span className="data-mono text-text-dim">{typeof boardCount === 'number' ? `${boardCount} board` : 'board'}</span>
               }
               onPress={() => navigate(`/team?id=${team.id}`)}
               onDelete={() => handleDelete(team.id)}

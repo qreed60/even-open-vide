@@ -13,6 +13,7 @@ import { createModeEncoder } from 'even-toolkit/glass-mode';
 import { moveHighlight, clampIndex } from 'even-toolkit/glass-nav';
 import { fieldJoin, SEP } from 'even-toolkit/glass-format';
 import type { OpenVideSnapshot, OpenVideActions } from '../types';
+import { normalizeBoardExecutionStatus } from '../../lib/team-board';
 
 // taskScroll at 0 = default mode on screen entry (highlightedIndex starts at 0)
 const m = createModeEncoder({
@@ -25,6 +26,47 @@ const m = createModeEncoder({
 
 const PAGES = ['Tasks', 'Plan', 'Chat'];
 const CHAT_BUTTONS = ['Chat', 'Input', 'Read'];
+const QUEUE_TASK_STATUSES = new Set([
+  'queued',
+  'waiting',
+  'running',
+  'completed',
+  'failed',
+  'cancelled',
+  'interrupted',
+  'blocked',
+]);
+const RAW_ID_PATTERN = /^(queue_task_|queue_run_|task_|board_item_)[A-Za-z0-9_-]*/;
+
+function compactTaskStatus(status: unknown): string | null {
+  const normalized = normalizeBoardExecutionStatus(status);
+  if (normalized === 'waiting_for_team_slot' || normalized === 'waiting_for_model') return 'waiting';
+  if (QUEUE_TASK_STATUSES.has(normalized)) return normalized;
+  return null;
+}
+
+function compactTaskTitle(title: string | undefined): string {
+  const text = title?.trim();
+  if (!text || RAW_ID_PATTERN.test(text)) return 'Board item';
+  return text;
+}
+
+function routeLabel(route: unknown): string {
+  if (!Array.isArray(route) || route.length === 0) return '';
+  return route.map((item) => {
+    if (typeof item === 'string') return item;
+    if (!item || typeof item !== 'object') return 'member';
+    const record = item as { role?: string; member?: string; name?: string };
+    return record.role || record.member || record.name || 'member';
+  }).join('>');
+}
+
+function chatLine(msg: OpenVideSnapshot['teamMessages'][number], width: number): string {
+  const route = routeLabel(msg.orchestration?.route);
+  const status = msg.orchestration?.status ? truncate(msg.orchestration.status.toUpperCase(), 8) : '';
+  const sender = route || status ? fieldJoin(truncate(msg.from, 8), route || status) : truncate(msg.from, 10);
+  return `${sender} ${SEP} ${truncate(msg.text, width)}`;
+}
 
 export const teamDetailScreen: GlassScreen<OpenVideSnapshot, OpenVideActions> = {
   display: (snap, nav) => {
@@ -32,7 +74,7 @@ export const teamDetailScreen: GlassScreen<OpenVideSnapshot, OpenVideActions> = 
     const teamName = truncate(team?.name ?? 'Team', 16).toUpperCase();
     const mode = m.getMode(nav.highlightedIndex);
     const offset = m.getOffset(nav.highlightedIndex);
-    const tasks = snap.teamTasks;
+    const tasks = snap.teamTasks.filter((task) => compactTaskStatus(task.executionStatus));
     const msgs = snap.teamMessages;
 
     // Determine current page label
@@ -68,9 +110,8 @@ export const teamDetailScreen: GlassScreen<OpenVideSnapshot, OpenVideActions> = 
         return { lines: [...headerLines, line('No tasks', 'meta')] };
       }
       const taskLines = tasks.map(task => {
-        const st = task.status === 'TODO' ? 'TODO' : task.status === 'IN PROGRESS' ? 'PROG' : task.status === 'DONE' ? 'DONE' : task.status.slice(0, 4).toUpperCase();
-        const owner = task.owner ? ` @${truncate(task.owner, 8)}` : '';
-        return `${st} ${SEP} ${truncate(task.subject, 38 - owner.length)}${owner}`;
+        const st = compactTaskStatus(task.executionStatus) ?? 'queued';
+        return `${st} ${SEP} ${truncate(compactTaskTitle(task.title), 38)}`;
       });
       const start = Math.max(0, Math.min(offset, taskLines.length - contentSlots));
       const visible = taskLines.slice(start, start + contentSlots);
@@ -95,7 +136,7 @@ export const teamDetailScreen: GlassScreen<OpenVideSnapshot, OpenVideActions> = 
     // handler cycle through Chat / Read / Input in the header bar instead.
     if (mode === 'chatButtons') {
       const lastMsg = msgs.length > 0
-        ? `${truncate(msgs[msgs.length - 1].from, 8)}: ${truncate(msgs[msgs.length - 1].text, 40)}`
+        ? chatLine(msgs[msgs.length - 1], 38)
         : 'No messages';
       return {
         lines: [
@@ -111,7 +152,7 @@ export const teamDetailScreen: GlassScreen<OpenVideSnapshot, OpenVideActions> = 
       if (msgs.length === 0) {
         return { lines: [...headerLines, line('No messages', 'meta')] };
       }
-      const msgLines = msgs.map(msg => `${truncate(msg.from, 10)} ${SEP} ${truncate(msg.text, 44)}`);
+      const msgLines = msgs.map(msg => chatLine(msg, 40));
       const maxBot = Math.max(0, msgLines.length - contentSlots);
       const cOff = Math.min(offset, maxBot);
       const start = Math.max(0, msgLines.length - contentSlots - cOff);

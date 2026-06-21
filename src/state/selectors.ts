@@ -38,6 +38,24 @@ function line(text: string, inverted = false, style?: LineStyle): DisplayLine {
   return { text, inverted, style: style ?? (inverted ? 'inverted' : 'normal') };
 }
 
+const QUEUE_TASK_STATUS_LABELS = new Set([
+  'queued',
+  'waiting',
+  'running',
+  'completed',
+  'failed',
+  'cancelled',
+  'interrupted',
+  'blocked',
+]);
+
+function normalizeTeamTaskStatus(status: string): string | null {
+  const normalized = status.toLowerCase().replace(/[\s-]+/g, '_');
+  if (normalized === 'waiting_for_team_slot' || normalized === 'waiting_for_model') return 'waiting';
+  if (normalized === 'canceled') return 'cancelled';
+  return QUEUE_TASK_STATUS_LABELS.has(normalized) ? normalized : null;
+}
+
 /**
  * Returns structured display data for the canvas renderer.
  */
@@ -911,30 +929,24 @@ function teamDetailData(state: AppState): DisplayData {
 
   if (state.teamTasks.length === 0) {
     lines.push(line(''));
-    lines.push(line('Loading tasks...'));
+    lines.push(line('No tasks'));
     return { lines };
   }
 
-  const statusOrder = ['TODO', 'IN PROGRESS', 'DONE', 'REVIEW', 'APPROVED'];
-  const grouped: Record<string, typeof state.teamTasks> = {};
+  let taskIndex = 0;
   for (const task of state.teamTasks) {
-    const s = task.status.toUpperCase();
-    if (!grouped[s]) grouped[s] = [];
-    grouped[s].push(task);
+    const status = normalizeTeamTaskStatus(task.status);
+    if (!status) continue;
+    const ownerTag = task.owner ? ` @${task.owner}` : '';
+    const maxLen = 44 - status.length - ownerTag.length - 4;
+    const subject = task.subject.length > maxLen ? task.subject.slice(0, maxLen - 3) + '...' : task.subject;
+    lines.push(line(` ${status} · ${subject}${ownerTag}`, taskIndex === hi));
+    taskIndex++;
   }
 
-  let taskIndex = 0;
-  for (const status of statusOrder) {
-    const tasks = grouped[status];
-    if (!tasks || tasks.length === 0) continue;
-    lines.push(line(`-- ${status} (${tasks.length}) --`, false, 'meta'));
-    for (const task of tasks) {
-      const ownerTag = task.owner ? ` @${task.owner}` : '';
-      const maxLen = 44 - ownerTag.length - 1;
-      const subject = task.subject.length > maxLen ? task.subject.slice(0, maxLen - 3) + '...' : task.subject;
-      lines.push(line(` ${subject}${ownerTag}`, taskIndex === hi));
-      taskIndex++;
-    }
+  if (taskIndex === 0) {
+    lines.push(line(''));
+    lines.push(line('No tasks'));
   }
 
   return { lines };
