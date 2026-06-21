@@ -1,11 +1,26 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useMemo, useState, useRef } from 'react';
 import { useSearchParams } from 'react-router';
 import { Select } from 'even-toolkit/web';
 import { ProviderBadge } from '../components/chat/provider-badge';
 import { ChatBubble } from '../components/chat/chat-bubble';
 import { ChatInput } from '../components/chat/chat-input';
-import { rpc } from '../domain/daemon-client';
+import { rpc, type RpcResponse } from '../domain/daemon-client';
 import { usePullRefresh } from '../hooks/use-pull-refresh';
+import {
+  normalizeQueueData,
+  deletedQueueItemIds,
+  loadDeletedQueueChatRecords,
+  loadDeletedQueueItems,
+  queueDisplayItemDeleteId,
+  queueDisplayItemDeleteTarget,
+  queueDisplayItemIsChat,
+  queueDisplayItemIsDeleted,
+  queueDisplayItemPrompt,
+  queueDisplayItemStableTaskId,
+  saveDeletedQueueChatRecord,
+  type DeletedQueueItemRecord,
+  type QueueDisplayItem,
+} from '../lib/team-queue';
 
 interface TeamMessageSummary {
   id: string;
@@ -49,6 +64,22 @@ interface OrchestratorRunSummary extends OrchestrationMetadata {
 
 interface OrchestratorRunDetail extends OrchestratorRunSummary {
   events?: OrchestrationEvent[];
+}
+
+const AI_TOOLS = ['claude', 'codex', 'gemini'];
+
+interface QueuedChatEntry {
+  localId: string;
+  text: string;
+  to: string;
+  createdAt: string;
+  queueTaskId?: string;
+  queueRunIds: string[];
+}
+
+interface VisibleQueuedChatEntry extends QueuedChatEntry {
+  deleted?: boolean;
+  item?: QueueDisplayItem;
 }
 
 function formatRecipient(to: string): string {
@@ -110,6 +141,139 @@ function getRunId(run: OrchestratorRunSummary): string {
   return run.id || run.runId || '';
 }
 
+async function softRpc(cmd: string, params?: Record<string, unknown>): Promise<RpcResponse> {
+  try {
+    return await rpc(cmd, params);
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function readString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function readStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map(readString).filter((entry): entry is string => Boolean(entry));
+}
+
+function queuedChatFromResponse(res: RpcResponse, text: string, to: string): QueuedChatEntry {
+  const record = res as Record<string, unknown>;
+  const task = (record.task && typeof record.task === 'object') ? record.task as Record<string, unknown> : null;
+  const queueTask = (record.queueTask && typeof record.queueTask === 'object') ? record.queueTask as Record<string, unknown> : task;
+  const queueTaskId = readString(record.taskId)
+    ?? readString(record.queueTaskId)
+    ?? (queueTask ? readString(queueTask.id) ?? readString(queueTask.taskId) : undefined);
+  const queueRunIds = readStringArray(record.runIds)
+    .concat(readStringArray(record.queueRunIds))
+    .concat(queueTask ? readStringArray(queueTask.runIds) : []);
+  const uniqueRunIds = queueRunIds.filter((runId, index, allRunIds) => allRunIds.indexOf(runId) === index);
+  return {
+    localId: queueTaskId ? `queued-chat-${queueTaskId}` : `queued-chat-${Date.now().toString(36)}`,
+    text,
+    to,
+    createdAt: new Date().toISOString(),
+    queueTaskId,
+    queueRunIds: uniqueRunIds,
+  };
+}
+
+function queueItemForChat(entry: QueuedChatEntry, items: QueueDisplayItem[]): QueueDisplayItem | undefined {
+  return items.find((item) => {
+    if (entry.queueTaskId && (
+      item.id === entry.queueTaskId
+      || item.queueTaskId === entry.queueTaskId
+      || item.linkedQueueTaskId === entry.queueTaskId
+    )) return true;
+    return entry.queueRunIds.some((runId) => (
+      item.id === runId
+      || item.runId === runId
+      || item.primaryRunId === runId
+      || item.runIds?.includes(runId)
+      || item.queueRunIds?.includes(runId)
+    ));
+  });
+}
+
+function queueStatusLabel(entry: QueuedChatEntry, item?: QueueDisplayItem, deleted = false): string {
+  if (deleted) return 'deleted';
+  const status = item?.status ?? (entry.queueTaskId ? 'queued' : 'queued');
+  const normalized = status.toLowerCase().replace(/[\s-]+/g, '_');
+  if (normalized.includes('cancel')) return 'cancelled';
+  if (normalized.includes('run') || normalized.includes('active') || normalized.includes('progress')) return 'running';
+  if (normalized.includes('complete') || normalized.includes('done') || normalized.includes('success')) return 'completed';
+  if (normalized.includes('fail') || normalized.includes('error')) return 'failed';
+  if (normalized.includes('wait')) return 'waiting';
+  if (normalized.includes('queue') || normalized.includes('pending') || normalized.includes('ready')) return 'queued';
+  return status;
+}
+
+function deletedChatEntryFromRecord(record: DeletedQueueItemRecord): VisibleQueuedChatEntry {
+  return {
+    localId: `deleted-queued-chat-${record.id}`,
+    text: record.text ?? '',
+    to: record.to ?? 'team',
+    createdAt: record.createdAt ?? new Date().toISOString(),
+    queueTaskId: record.queueTaskId ?? record.id,
+    queueRunIds: record.queueRunIds ?? (record.queueRunId ? [record.queueRunId] : []),
+    deleted: true,
+  };
+}
+
+function deletedRecordForChatEntry(teamId: string, entry: QueuedChatEntry, item?: QueueDisplayItem): DeletedQueueItemRecord | null {
+  const targetId = entry.queueTaskId ?? (item ? queueDisplayItemDeleteId(item) : undefined);
+  if (!targetId) return null;
+  return {
+    id: targetId,
+    teamId,
+    text: entry.text,
+    to: entry.to,
+    createdAt: entry.createdAt,
+    queueTaskId: entry.queueTaskId ?? item?.queueTaskId ?? item?.linkedQueueTaskId,
+    queueRunId: item?.primaryRunId ?? item?.runId,
+    queueRunIds: entry.queueRunIds.length ? entry.queueRunIds : item?.queueRunIds ?? item?.runIds,
+  };
+}
+
+async function deleteQueuedChatItem(entry: QueuedChatEntry, item?: QueueDisplayItem): Promise<RpcResponse> {
+  if (entry.queueTaskId) return rpc('team.queue.item.delete', { queueTaskId: entry.queueTaskId });
+  const target = item ? queueDisplayItemDeleteTarget(item) : null;
+  if (!target) return { ok: false, error: 'No queue item id available' };
+  return rpc('team.queue.item.delete', target);
+}
+
+function isCancelledQueueStatus(status: string): boolean {
+  return status.toLowerCase().includes('cancel');
+}
+
+function queuedChatEntryFromItem(item: QueueDisplayItem): QueuedChatEntry {
+  const stableId = queueDisplayItemStableTaskId(item);
+  const target = queueDisplayItemDeleteTarget(item);
+  const text = queueDisplayItemPrompt(item);
+  return {
+    localId: `queued-chat-${stableId}`,
+    text,
+    to: 'team',
+    createdAt: item.createdAt ?? item.startedAt ?? item.updatedAt ?? new Date().toISOString(),
+    queueTaskId: target?.queueTaskId,
+    queueRunIds: [
+      target?.queueRunId,
+      ...(item.queueRunIds ?? []),
+      ...(item.runIds ?? []),
+      item.runId,
+      item.primaryRunId,
+    ].filter((runId, index, allRunIds): runId is string => Boolean(runId) && allRunIds.indexOf(runId) === index),
+  };
+}
+
+function isUserMessage(msg: TeamMessageSummary): boolean {
+  if (msg.from === 'user' || msg.from === 'you') return true;
+  if (msg.fromTool && AI_TOOLS.includes(msg.fromTool)) return false;
+  if (AI_TOOLS.includes(msg.from.toLowerCase())) return false;
+  return !msg.fromTool;
+}
+
 function sameMessages(a: TeamMessageSummary[], b: TeamMessageSummary[]): boolean {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i += 1) {
@@ -140,6 +304,11 @@ export function TeamChatRoute() {
   const [loading, setLoading] = useState(true);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
+  const [queueError, setQueueError] = useState('');
+  const [queuedChats, setQueuedChats] = useState<QueuedChatEntry[]>([]);
+  const [deletedQueuedChats, setDeletedQueuedChats] = useState<DeletedQueueItemRecord[]>(() => loadDeletedQueueChatRecords(teamId));
+  const [queueItems, setQueueItems] = useState<QueueDisplayItem[]>([]);
+  const [deletingQueueId, setDeletingQueueId] = useState<string | null>(null);
   const [autoScroll, setAutoScroll] = useState(true);
   const [runs, setRuns] = useState<OrchestratorRunSummary[]>([]);
   const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
@@ -168,16 +337,37 @@ export function TeamChatRoute() {
     } catch { /* metadata RPC may not exist on older daemons */ }
   };
 
+  const refreshQueueState = async () => {
+    const responses = await Promise.all([
+      softRpc('team.queue.status', { teamId }),
+      softRpc('team.task.list', { teamId }),
+      softRpc('team.run.list', { teamId }),
+    ]);
+    const normalized = normalizeQueueData(responses);
+    const deletedIds = deletedQueueItemIds(loadDeletedQueueItems());
+    setQueueItems(normalized.items
+      .filter((item) => item.teamId === teamId || !item.teamId)
+      .filter((item) => !queueDisplayItemIsDeleted(item, deletedIds)));
+  };
+
   useEffect(() => {
     if (!teamId) return;
+    setDeletedQueuedChats(loadDeletedQueueChatRecords(teamId));
     refresh();
     refreshRuns();
+    refreshQueueState();
     const interval = setInterval(refresh, 3000);
     const runsInterval = setInterval(refreshRuns, 10000);
+    const queueInterval = setInterval(refreshQueueState, 3000);
     return () => {
       clearInterval(interval);
       clearInterval(runsInterval);
+      clearInterval(queueInterval);
     };
+  }, [teamId]);
+
+  useEffect(() => {
+    setQueuedChats([]);
   }, [teamId]);
 
   useEffect(() => {
@@ -196,29 +386,117 @@ export function TeamChatRoute() {
   useEffect(() => {
     if (!autoScroll) return;
     bottomRef.current?.scrollIntoView({ behavior: 'auto' });
-  }, [autoScroll, messages]);
+  }, [autoScroll, messages, queuedChats, queueItems]);
 
   const handleSend = async () => {
     if (!draft.trim() || sending) return;
+    const text = draft.trim();
     setSending(true);
+    setQueueError('');
     try {
-      await rpc('team.message.send', { teamId, to: recipient, text: draft.trim() });
-      setDraft('');
-      await refresh();
-    } catch { /* ignore */ }
+      const res = await rpc('team.chat.queue', {
+        teamId,
+        text,
+        to: recipient,
+        from: 'user',
+      });
+      if (res.ok) {
+        const queuedChat = queuedChatFromResponse(res, text, recipient);
+        setQueuedChats((current) => [...current, queuedChat]);
+        setDraft('');
+        await Promise.all([refreshRuns(), refreshQueueState()]);
+      } else {
+        setQueueError(res.error ?? 'Queue failed');
+      }
+    } catch (error) {
+      setQueueError(error instanceof Error ? error.message : String(error));
+    }
     setSending(false);
   };
 
   const { pullHandlers, PullIndicator } = usePullRefresh(refresh);
+  const visibleQueuedChats = useMemo(() => {
+    const persistedUserMessages = new Set(
+      messages
+        .filter((message) => isUserMessage(message))
+        .map((message) => `${message.to}:${message.text}`),
+    );
+    const byTaskId = new Map<string, VisibleQueuedChatEntry>();
+    const deletedIds = new Set(deletedQueuedChats.map((entry) => entry.id));
+    const fallbackEntries: VisibleQueuedChatEntry[] = [];
 
-  const AI_TOOLS = ['claude', 'codex', 'gemini'];
-  const isUserMessage = (msg: TeamMessageSummary) => {
-    if (msg.from === 'user' || msg.from === 'you') return true;
-    if (msg.fromTool && AI_TOOLS.includes(msg.fromTool)) return false;
-    // Infer from sender name: if it matches a known AI tool, treat as AI
-    if (AI_TOOLS.includes(msg.from.toLowerCase())) return false;
-    // Default: messages without fromTool from unknown senders are user messages
-    return !msg.fromTool;
+    for (const entry of queuedChats) {
+      const item = queueItemForChat(entry, queueItems);
+      const key = entry.queueTaskId ?? item?.queueTaskId ?? item?.linkedQueueTaskId;
+      const nextEntry = { ...entry, item };
+      if (key) {
+        byTaskId.set(key, nextEntry);
+      } else {
+        fallbackEntries.push(nextEntry);
+      }
+    }
+
+    for (const item of queueItems) {
+      if (!queueDisplayItemIsChat(item)) continue;
+      const entry = queuedChatEntryFromItem(item);
+      const key = queueDisplayItemDeleteId(item) ?? entry.queueTaskId ?? entry.localId;
+      const existingEntry = byTaskId.get(key);
+      byTaskId.set(key, existingEntry
+        ? { ...existingEntry, ...entry, item, deleted: deletedIds.has(key) }
+        : { ...entry, item, deleted: deletedIds.has(key) });
+    }
+
+    for (const record of deletedQueuedChats) {
+      if (!record.text) continue;
+      const existingEntry = byTaskId.get(record.id);
+      byTaskId.set(record.id, existingEntry
+        ? { ...existingEntry, deleted: true, text: record.text, to: record.to ?? existingEntry.to }
+        : deletedChatEntryFromRecord(record));
+    }
+
+    const entries = [
+      ...fallbackEntries,
+      ...Array.from(byTaskId.entries()).map(([key, entry]) => ({
+        ...entry,
+        deleted: entry.deleted ?? deletedIds.has(key),
+      })),
+    ];
+
+    return entries.map((entry) => ({
+      entry,
+      showBubble: !persistedUserMessages.has(`${entry.to}:${entry.text}`),
+    }));
+  }, [messages, queuedChats, queueItems, deletedQueuedChats]);
+
+  const deletedQueuedChatTexts = useMemo(() => new Set(
+    visibleQueuedChats
+      .filter(({ entry }) => entry.deleted)
+      .map(({ entry }) => entry.text),
+  ), [visibleQueuedChats]);
+
+  const displayedMessages = useMemo(() => (
+    messages.filter((message) => !(isUserMessage(message) && deletedQueuedChatTexts.has(message.text)))
+  ), [messages, deletedQueuedChatTexts]);
+
+  const handleDeleteQueuedChat = async (entry: QueuedChatEntry) => {
+    const item = queueItemForChat(entry, queueItems);
+    const record = deletedRecordForChatEntry(teamId, entry, item);
+    if (!record) return;
+    setQueueError('');
+    setDeletingQueueId(record.id);
+    try {
+      const res = await deleteQueuedChatItem(entry, item);
+      if (!res.ok) {
+        setQueueError(res.error ?? 'Delete failed');
+      } else {
+        saveDeletedQueueChatRecord(teamId, record);
+        setDeletedQueuedChats(loadDeletedQueueChatRecords(teamId));
+        await Promise.all([refresh(), refreshRuns(), refreshQueueState()]);
+      }
+    } catch (error) {
+      setQueueError(error instanceof Error ? error.message : String(error));
+    }
+    setDeletingQueueId(null);
   };
 
   const handleScroll = () => {
@@ -273,7 +551,7 @@ export function TeamChatRoute() {
                       onClick={() => { if (runId) toggleRun(runId); }}
                     >
                       <div className="flex items-center justify-between gap-2">
-                        <span className="truncate text-[12px] tracking-[-0.12px] font-normal">{route || runId || 'run'}</span>
+                        <span className="truncate text-[12px] tracking-[-0.12px] font-normal">{route || 'Run'}</span>
                         <span className="data-mono shrink-0">{run.status ?? 'unknown'}</span>
                       </div>
                       <div className="mt-1 flex items-center gap-2 text-[11px] tracking-[-0.11px]">
@@ -301,7 +579,7 @@ export function TeamChatRoute() {
           </div>
         )}
 
-        {!loading && messages.length === 0 && (
+        {!loading && displayedMessages.length === 0 && visibleQueuedChats.length === 0 && (
           <div className="flex flex-1 flex-col items-center justify-center py-15 text-center text-text-dim">
             <div className="text-[40px] mb-4 opacity-30">{'\u{1F4AC}'}</div>
             <div className="text-[15px] tracking-[-0.15px] font-normal text-text mb-1.5">No messages yet</div>
@@ -309,7 +587,7 @@ export function TeamChatRoute() {
           </div>
         )}
 
-        {messages.map((msg) => {
+        {displayedMessages.map((msg) => {
           const isUser = isUserMessage(msg);
           const orchestration = msg.orchestration;
           const route = formatRoute(orchestration?.route);
@@ -353,6 +631,45 @@ export function TeamChatRoute() {
             </div>
           );
         })}
+
+        {visibleQueuedChats.map(({ entry, showBubble }) => {
+          const item = entry.item ?? queueItemForChat(entry, queueItems);
+          const status = queueStatusLabel(entry, item, entry.deleted);
+          const canDelete = !entry.deleted && isCancelledQueueStatus(status);
+          const deleteId = entry.queueTaskId ?? (item ? queueDisplayItemDeleteId(item) : undefined);
+          return (
+            <div key={entry.localId} className="msg-enter flex flex-col items-end">
+              {entry.deleted ? (
+                <div className="max-w-[92%] rounded-[14px] border border-border bg-surface px-3 py-2 text-[13px] tracking-[-0.13px] text-text-dim">
+                  Message deleted
+                </div>
+              ) : showBubble && (
+                <ChatBubble
+                  role="user"
+                  tool="user"
+                  timestamp={new Date(entry.createdAt).getTime()}
+                >
+                  {entry.text}
+                </ChatBubble>
+              )}
+              <div className="mt-1 flex max-w-[92%] items-center justify-end gap-1.5">
+                <span className={`rounded-full border px-2 py-0.5 text-[10px] tracking-[-0.1px] ${statusClass(status)}`}>
+                  {status}
+                </span>
+                {canDelete && (
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteQueuedChat(entry)}
+                    disabled={Boolean(deleteId && deletingQueueId === deleteId)}
+                    className="rounded-full border border-border bg-surface px-2 py-0.5 text-[10px] tracking-[-0.1px] text-text-dim"
+                  >
+                    {deleteId && deletingQueueId === deleteId ? 'Deleting...' : 'Delete'}
+                  </button>
+                )}
+              </div>
+            </div>
+          );
+        })}
         <div ref={bottomRef} />
       </div>
 
@@ -367,6 +684,11 @@ export function TeamChatRoute() {
           isRunning={sending}
           placeholder="Type a message to the team..."
         />
+        <div className="mt-2 flex items-center justify-between gap-2">
+          <div className="min-w-0">
+            {queueError && <p className="text-[11px] tracking-[-0.11px] text-negative truncate">{queueError}</p>}
+          </div>
+        </div>
       </div>
     </div>
   );

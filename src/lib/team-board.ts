@@ -12,6 +12,9 @@ export type BoardExecutionStatus =
   | 'interrupted'
   | 'blocked';
 
+export type NormalizedBoardExecutionStatus = BoardExecutionStatus | 'waiting';
+export type BoardExecutionGroup = Exclude<NormalizedBoardExecutionStatus, 'waiting_for_team_slot' | 'waiting_for_model'> | 'other';
+
 export type BoardReviewStatus =
   | 'not_required'
   | 'pending_review'
@@ -24,6 +27,7 @@ export interface TeamBoardItem {
   teamId?: string;
   title: string;
   description?: string;
+  excerpt?: string;
   source?: string;
   executionStatus: BoardExecutionStatus | string;
   reviewStatus: BoardReviewStatus | string;
@@ -44,6 +48,24 @@ export interface TeamBoardItem {
 type AnyRecord = Record<string, unknown>;
 
 const BOARD_ITEM_KEYS = ['items', 'boardItems', 'teamBoardItems', 'teamBoard', 'board'];
+export const BOARD_EXECUTION_GROUP_ORDER: BoardExecutionGroup[] = [
+  'draft',
+  'queued',
+  'waiting',
+  'running',
+  'completed',
+  'failed',
+  'cancelled',
+  'interrupted',
+  'blocked',
+];
+const WAITING_BOARD_EXECUTION_STATUSES = new Set<NormalizedBoardExecutionStatus>([
+  'waiting',
+  'waiting_for_team_slot',
+  'waiting_for_model',
+]);
+const RAW_ID_PATTERN = /^(queue_task_|queue_run_|task_|board_item_)[A-Za-z0-9_-]*/;
+const DESCRIPTION_MAX_LENGTH = 220;
 const BOARD_EXECUTION_STATUS_ALIASES: Record<string, BoardExecutionStatus | 'waiting'> = {
   todo: 'draft',
   open: 'draft',
@@ -93,10 +115,41 @@ function readStringArray(record: AnyRecord, keys: string[]): string[] {
   return [];
 }
 
-export function normalizeBoardExecutionStatus(value: unknown): BoardExecutionStatus | 'waiting' {
+function isRawIdText(value: string | undefined): boolean {
+  return Boolean(value && RAW_ID_PATTERN.test(value));
+}
+
+function excerptText(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const compacted = value.replace(/\s+/g, ' ').trim();
+  if (!compacted) return undefined;
+  if (compacted.length <= DESCRIPTION_MAX_LENGTH) return compacted;
+  return `${compacted.slice(0, DESCRIPTION_MAX_LENGTH - 1).trimEnd()}...`;
+}
+
+export function normalizeBoardExecutionStatus(value: unknown): NormalizedBoardExecutionStatus {
   const status = toText(value)?.toLowerCase().replace(/[\s-]+/g, '_');
   if (!status) return 'draft';
   return BOARD_EXECUTION_STATUS_ALIASES[status] ?? (status as BoardExecutionStatus | 'waiting');
+}
+
+export function boardExecutionGroup(status: NormalizedBoardExecutionStatus): BoardExecutionGroup {
+  if (WAITING_BOARD_EXECUTION_STATUSES.has(status)) return 'waiting';
+  if (status === 'waiting_for_team_slot' || status === 'waiting_for_model') return 'waiting';
+  return BOARD_EXECUTION_GROUP_ORDER.includes(status) ? status : 'other';
+}
+
+export function groupBoardItemsByExecutionStatus(items: TeamBoardItem[]): Record<BoardExecutionGroup, TeamBoardItem[]> {
+  const grouped = Object.fromEntries(
+    [...BOARD_EXECUTION_GROUP_ORDER, 'other'].map((status) => [status, []]),
+  ) as unknown as Record<BoardExecutionGroup, TeamBoardItem[]>;
+
+  for (const item of items) {
+    const executionStatus = normalizeBoardExecutionStatus(item.executionStatus);
+    grouped[boardExecutionGroup(executionStatus)].push(item);
+  }
+
+  return grouped;
 }
 
 function collectRecords(value: unknown, keys: string[], depth = 0): unknown[] {
@@ -114,17 +167,20 @@ function normalizeBoardItem(value: unknown): TeamBoardItem | null {
   if (!isRecord(value)) return null;
   const id = readText(value, ['id', 'itemId', 'item_id', 'boardItemId', 'board_item_id']);
   if (!id) return null;
+  const description = readText(value, ['description', 'body', 'details']);
+  const title = readText(value, ['title', 'subject', 'name']);
   return {
     id,
     teamId: readText(value, ['teamId', 'team_id']),
-    title: readText(value, ['title', 'subject', 'name']) ?? id,
-    description: readText(value, ['description', 'body', 'details']),
-    source: readText(value, ['source']),
+    title: title && !isRawIdText(title) ? title : 'Board item',
+    description,
+    excerpt: excerptText(description),
+    source: isRawIdText(readText(value, ['source'])) ? undefined : readText(value, ['source']),
     executionStatus: normalizeBoardExecutionStatus(readText(value, ['executionStatus', 'execution_status'])),
     reviewStatus: readText(value, ['reviewStatus', 'review_status']) ?? 'not_required',
     assignedMembers: readStringArray(value, ['assignedMembers', 'assigned_members', 'assignees', 'owners']),
     reviewerMembers: readStringArray(value, ['reviewerMembers', 'reviewer_members', 'reviewers']),
-    priority: readText(value, ['priority']),
+    priority: isRawIdText(readText(value, ['priority'])) ? undefined : readText(value, ['priority']),
     queueTaskId: readText(value, ['queueTaskId', 'queue_task_id']),
     queueRunIds: readStringArray(value, ['queueRunIds', 'queue_run_ids', 'runIds', 'run_ids']),
     createdAt: readText(value, ['createdAt', 'created_at']),

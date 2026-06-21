@@ -5,7 +5,7 @@ import { IcEditAdd, IcEditChecklist, IcEditEdit, IcEditTrash, IcFeatLearnExplore
 import { rpc } from '../domain/daemon-client';
 import { usePullRefresh } from '../hooks/use-pull-refresh';
 import { UNTITLED_DIALOG_CLASS } from '../lib/dialog';
-import { normalizeBoardExecutionStatus, normalizeBoardItems, type TeamBoardItem, type BoardReviewStatus } from '../lib/team-board';
+import { BOARD_EXECUTION_GROUP_ORDER, groupBoardItemsByExecutionStatus, normalizeBoardExecutionStatus, normalizeBoardItems, type BoardExecutionGroup, type TeamBoardItem, type BoardReviewStatus } from '../lib/team-board';
 import { isProviderSelectable, providerCapabilityHint, providerOptionsFromMetadata, roleOptionsFromMetadata, type TeamProviderCapability } from '../lib/team-metadata';
 import { TeamRunsPanel } from './team-runs';
 
@@ -45,35 +45,19 @@ interface TeamPlanSummary {
   }>;
 }
 
-const BOARD_EXECUTION_STATUSES = [
-  'draft',
-  'queued',
-  'waiting',
-  'running',
-  'completed',
-  'failed',
-  'cancelled',
-  'interrupted',
-  'blocked',
-];
-
 const BOARD_REVIEW_STATUSES: BoardReviewStatus[] = ['pending_review', 'approved', 'revise', 'rejected'];
-const WAITING_EXECUTION_STATUSES = new Set(['waiting', 'waiting_for_team_slot', 'waiting_for_model']);
-const LEGACY_TASK_ID_PREFIX = 'task_';
-const BOARD_ITEM_ID_PREFIX = 'board_item_';
 
-const boardDotColor: Record<string, string> = {
+const boardDotColor: Record<BoardExecutionGroup, string> = {
   draft: 'bg-text-dim',
   queued: 'bg-[#4285F4]',
   waiting: 'bg-accent-warning',
-  waiting_for_team_slot: 'bg-accent-warning',
-  waiting_for_model: 'bg-accent-warning',
   running: 'bg-positive',
   completed: 'bg-positive',
   failed: 'bg-negative',
   cancelled: 'bg-text-dim',
   interrupted: 'bg-accent-warning',
   blocked: 'bg-negative',
+  other: 'bg-text-dim',
 };
 
 const PLAN_MODE_OPTIONS = [
@@ -98,18 +82,6 @@ let memberDraftIdCounter = 0;
 function createMemberDraftId(): string {
   memberDraftIdCounter += 1;
   return `member-${Date.now().toString(36)}-${memberDraftIdCounter}`;
-}
-
-function boardExecutionGroup(status: string): string {
-  if (WAITING_EXECUTION_STATUSES.has(status)) return 'waiting';
-  return BOARD_EXECUTION_STATUSES.includes(status) ? status : 'other';
-}
-
-function primaryBoardDebugId(item: TeamBoardItem): string | undefined {
-  if (item.queueTaskId) return item.queueTaskId;
-  if (item.id.startsWith(BOARD_ITEM_ID_PREFIX)) return item.id;
-  if (!item.id.startsWith(LEGACY_TASK_ID_PREFIX)) return item.id;
-  return undefined;
 }
 
 export function TeamDetailRoute() {
@@ -346,19 +318,11 @@ export function TeamDetailRoute() {
     setDeletingPlanId(null);
   };
 
-  const grouped: Record<string, TeamBoardItem[]> = {};
-  for (const status of BOARD_EXECUTION_STATUSES) grouped[status] = [];
-  const otherBoardItems: TeamBoardItem[] = [];
-  for (const item of boardItems) {
-    const executionStatus = normalizeBoardExecutionStatus(item.executionStatus);
-    const group = boardExecutionGroup(executionStatus);
-    if (grouped[group]) {
-      grouped[group].push(item);
-    } else {
-      otherBoardItems.push(item);
-    }
-  }
-  if (otherBoardItems.length > 0) grouped.other = otherBoardItems;
+  const groupedBoardItems = useMemo(() => groupBoardItemsByExecutionStatus(boardItems), [boardItems]);
+  const boardSections = useMemo(() => (
+    [...BOARD_EXECUTION_GROUP_ORDER, ...(groupedBoardItems.other.length ? ['other' as const] : [])]
+      .map((status) => ({ status, items: groupedBoardItems[status] }))
+  ), [groupedBoardItems]);
 
   const latestRevision = useMemo(() => latestPlan?.revisions?.[latestPlan.revisions.length - 1] ?? null, [latestPlan]);
   const teamToolOptions = providerOptionsFromMetadata(teamMetadata);
@@ -444,8 +408,7 @@ export function TeamDetailRoute() {
 
             {!loading && !boardUnsupported && boardItems.length > 0 && (
               <div className="flex gap-3 overflow-x-auto pb-4">
-                {[...BOARD_EXECUTION_STATUSES, ...(grouped.other?.length ? ['other'] : [])].map((status) => {
-                  const statusItems = grouped[status] ?? [];
+                {boardSections.map(({ status, items: statusItems }) => {
                   return (
                     <div key={status} className="kanban-col flex flex-col gap-1.5">
                       <div className="kanban-col-header">
@@ -473,13 +436,9 @@ export function TeamDetailRoute() {
                             : ['queued', 'waiting', 'waiting_for_team_slot', 'waiting_for_model', 'running'].includes(executionStatus)
                               ? 'accent'
                               : 'neutral';
-                        const primaryDebugId = primaryBoardDebugId(item);
-                        const legacyTaskId = item.id.startsWith(LEGACY_TASK_ID_PREFIX) ? item.id : null;
                         const queueMeta = [
-                          item.queueTaskId ? `queue task ${item.queueTaskId}` : null,
-                          item.queueRunIds.length ? `runs ${item.queueRunIds.join(', ')}` : null,
+                          item.source,
                           item.priority ? `priority ${item.priority}` : null,
-                          legacyTaskId ? `legacy task ${legacyTaskId}` : null,
                         ].filter(Boolean);
                         const memberMeta = [
                           item.assignedMembers.length ? `assigned ${item.assignedMembers.join(', ')}` : null,
@@ -495,10 +454,9 @@ export function TeamDetailRoute() {
                                   <Badge variant={reviewVariant}>{item.reviewStatus}</Badge>
                                 </div>
                               </div>
-                              {primaryDebugId && <span className="data-mono shrink-0 text-text-dim">{primaryDebugId}</span>}
                             </div>
-                            {item.description && (
-                              <p className="text-[11px] tracking-[-0.11px] text-text-dim mt-2 line-clamp-3">{item.description}</p>
+                            {(item.excerpt || item.description) && (
+                              <p className="text-[11px] tracking-[-0.11px] text-text-dim mt-2 line-clamp-3">{item.excerpt ?? item.description}</p>
                             )}
                             {memberMeta.length > 0 && <p className="data-mono mt-2">{memberMeta.join(' · ')}</p>}
                             {queueMeta.length > 0 && <p className="data-mono mt-1 text-text-dim">{queueMeta.join(' · ')}</p>}

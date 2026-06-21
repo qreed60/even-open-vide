@@ -4,7 +4,6 @@ import type {
   Workspace,
   Settings,
   TeamSummary,
-  TeamTaskSummary,
   TeamMessageSummary,
   ScheduledTask,
   DiffFile,
@@ -13,6 +12,7 @@ import type {
   ActionResult,
   FsEntry,
 } from '../state/types';
+import type { TeamBoardItem } from '../lib/team-board';
 
 export interface OpenVideSnapshot {
   sessions: SessionSummary[];
@@ -34,7 +34,7 @@ export interface OpenVideSnapshot {
   voiceText: string | null;
   teams: TeamSummary[];
   selectedTeamId: string | null;
-  teamTasks: TeamTaskSummary[];
+  teamTasks: TeamBoardItem[];
   teamMessages: TeamMessageSummary[];
   teamPlan: {
     id: string;

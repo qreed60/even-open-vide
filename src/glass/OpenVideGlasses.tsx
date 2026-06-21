@@ -16,6 +16,8 @@ import { startVoiceCapture, stopVoiceCapture } from '../input/voice';
 import type { Store } from '../state/store';
 import type { Action } from '../state/actions';
 import { applySettingsPatch } from '../lib/settings';
+import { normalizeBoardItems, normalizeBoardExecutionStatus, type TeamBoardItem } from '../lib/team-board';
+import { deletedQueueItemIds, loadDeletedQueueItems } from '../lib/team-queue';
 import {
   SETTINGS_CACHE_KEY,
   SETTINGS_PENDING_KEY,
@@ -153,10 +155,10 @@ function useGlassTeams(hosts: Array<{
 }
 
 /**
- * Fetch team tasks + messages when viewing a specific team.
+ * Fetch queue-backed board tasks + messages when viewing a specific team.
  */
 function useGlassTeamData(teamId: string | null) {
-  const [tasks, setTasks] = useState<any[]>([]);
+  const [tasks, setTasks] = useState<TeamBoardItem[]>([]);
   const [messages, setMessages] = useState<any[]>([]);
   const [plan, setPlan] = useState<any | null>(null);
 
@@ -173,13 +175,25 @@ function useGlassTeamData(teamId: string | null) {
     async function fetch() {
       try {
         const [tasksRes, msgsRes, planRes] = await Promise.all([
-          rpc('team.task.list', { teamId }).catch(() => ({ ok: false })),
+          rpc('team.board.items.list', { teamId }).catch(() => ({ ok: false })),
           rpc('team.message.list', { teamId, limit: 50 }).catch(() => ({ ok: false })),
           rpc('team.plan.latest', { teamId }).catch(() => ({ ok: false })),
         ]);
         if (cancelled) return;
-        if ((tasksRes as any).ok && Array.isArray((tasksRes as any).teamTasks)) {
-          setTasks((tasksRes as any).teamTasks);
+        if ((tasksRes as any).ok) {
+          const deletedIds = deletedQueueItemIds(loadDeletedQueueItems());
+          setTasks(normalizeBoardItems(tasksRes as any).filter((item) => {
+            const executionStatus = normalizeBoardExecutionStatus(item.executionStatus);
+            if (executionStatus === 'draft' || String(executionStatus).includes('deleted')) return false;
+            const ids = [
+              item.id,
+              item.queueTaskId,
+              ...item.queueRunIds,
+            ];
+            return !ids.some((id) => Boolean(id && deletedIds.has(id)));
+          }));
+        } else {
+          setTasks([]);
         }
         if ((msgsRes as any).ok && Array.isArray((msgsRes as any).teamMessages)) {
           setMessages((msgsRes as any).teamMessages);
