@@ -75,6 +75,7 @@ interface QueuedChatEntry {
   createdAt: string;
   queueTaskId?: string;
   queueRunIds: string[];
+  clientMessageId?: string;
 }
 
 interface VisibleQueuedChatEntry extends QueuedChatEntry {
@@ -158,10 +159,11 @@ function readStringArray(value: unknown): string[] {
   return value.map(readString).filter((entry): entry is string => Boolean(entry));
 }
 
-function queuedChatFromResponse(res: RpcResponse, text: string, to: string): QueuedChatEntry {
+function queuedChatFromResponse(res: RpcResponse, text: string, to: string, clientMessageId: string): QueuedChatEntry {
   const record = res as Record<string, unknown>;
   const task = (record.task && typeof record.task === 'object') ? record.task as Record<string, unknown> : null;
   const queueTask = (record.queueTask && typeof record.queueTask === 'object') ? record.queueTask as Record<string, unknown> : task;
+  const sourceRef = (queueTask?.sourceRef && typeof queueTask.sourceRef === 'object') ? queueTask.sourceRef as Record<string, unknown> : null;
   const queueTaskId = readString(record.taskId)
     ?? readString(record.queueTaskId)
     ?? (queueTask ? readString(queueTask.id) ?? readString(queueTask.taskId) : undefined);
@@ -173,10 +175,22 @@ function queuedChatFromResponse(res: RpcResponse, text: string, to: string): Que
     localId: queueTaskId ? `queued-chat-${queueTaskId}` : `queued-chat-${Date.now().toString(36)}`,
     text,
     to,
-    createdAt: new Date().toISOString(),
+    createdAt: (queueTask ? readString(queueTask.createdAt) ?? readString(queueTask.queuedAt) : undefined) ?? new Date().toISOString(),
     queueTaskId,
     queueRunIds: uniqueRunIds,
+    clientMessageId: readString(record.clientMessageId) ?? (sourceRef ? readString(sourceRef.messageId) : undefined) ?? clientMessageId,
   };
+}
+
+function queuedChatEntryKey(entry: QueuedChatEntry): string {
+  return entry.queueTaskId ?? entry.clientMessageId ?? entry.localId;
+}
+
+function mergeQueuedChatEntries(current: QueuedChatEntry[], next: QueuedChatEntry): QueuedChatEntry[] {
+  const nextKey = queuedChatEntryKey(next);
+  const existingIndex = current.findIndex((entry) => queuedChatEntryKey(entry) === nextKey);
+  if (existingIndex === -1) return [...current, next];
+  return current.map((entry, index) => (index === existingIndex ? { ...entry, ...next } : entry));
 }
 
 function queueItemForChat(entry: QueuedChatEntry, items: QueueDisplayItem[]): QueueDisplayItem | undefined {
@@ -264,6 +278,7 @@ function queuedChatEntryFromItem(item: QueueDisplayItem): QueuedChatEntry {
       item.runId,
       item.primaryRunId,
     ].filter((runId, index, allRunIds): runId is string => Boolean(runId) && allRunIds.indexOf(runId) === index),
+    clientMessageId: item.clientMessageId,
   };
 }
 
@@ -293,6 +308,31 @@ function sameMessages(a: TeamMessageSummary[], b: TeamMessageSummary[]): boolean
     }
   }
   return true;
+}
+
+function newClientMessageId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  return `client-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function queueAssistantMessage(item: QueueDisplayItem | undefined): TeamMessageSummary | null {
+  if (!item?.assistantText?.trim()) return null;
+  return {
+    id: `queued-assistant-${item.primaryRunId ?? item.runId ?? item.queueRunIds?.[0] ?? item.id}`,
+    from: item.assistantFrom ?? item.currentMember ?? 'Lead',
+    fromTool: item.assistantProvider,
+    to: 'user',
+    text: item.assistantText,
+    createdAt: item.finishedAt ?? item.updatedAt ?? item.startedAt ?? item.createdAt ?? new Date().toISOString(),
+    orchestration: item.assistantRoute || item.assistantStatus || item.assistantProvider || item.assistantModel
+      ? {
+        status: item.assistantStatus === 'blocked' ? 'blocked' : item.assistantStatus === 'failed' ? 'failed' : 'completed',
+        route: item.assistantRoute ?? [],
+        provider: item.assistantProvider,
+        model: item.assistantModel,
+      }
+      : undefined,
+  };
 }
 
 export function TeamChatRoute() {
@@ -391,6 +431,7 @@ export function TeamChatRoute() {
   const handleSend = async () => {
     if (!draft.trim() || sending) return;
     const text = draft.trim();
+    const clientMessageId = newClientMessageId();
     setSending(true);
     setQueueError('');
     try {
@@ -399,10 +440,12 @@ export function TeamChatRoute() {
         text,
         to: recipient,
         from: 'user',
+        messageId: clientMessageId,
+        clientMessageId,
       });
       if (res.ok) {
-        const queuedChat = queuedChatFromResponse(res, text, recipient);
-        setQueuedChats((current) => [...current, queuedChat]);
+        const queuedChat = queuedChatFromResponse(res, text, recipient, clientMessageId);
+        setQueuedChats((current) => mergeQueuedChatEntries(current, queuedChat));
         setDraft('');
         await Promise.all([refreshRuns(), refreshQueueState()]);
       } else {
@@ -462,7 +505,7 @@ export function TeamChatRoute() {
       })),
     ];
 
-    return entries.map((entry) => ({
+    return entries.sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt)).map((entry) => ({
       entry,
       showBubble: !persistedUserMessages.has(`${entry.to}:${entry.text}`),
     }));
@@ -477,6 +520,41 @@ export function TeamChatRoute() {
   const displayedMessages = useMemo(() => (
     messages.filter((message) => !(isUserMessage(message) && deletedQueuedChatTexts.has(message.text)))
   ), [messages, deletedQueuedChatTexts]);
+
+  const assistantMessagesFromQueue = useMemo(() => {
+    const persistedAssistantMessages = new Set(
+      messages
+        .filter((message) => !isUserMessage(message))
+        .map((message) => `${message.from}:${message.text}`),
+    );
+    return visibleQueuedChats
+      .map(({ entry }) => queueAssistantMessage(entry.item ?? queueItemForChat(entry, queueItems)))
+      .filter((message): message is TeamMessageSummary => Boolean(message))
+      .filter((message) => !persistedAssistantMessages.has(`${message.from}:${message.text}`));
+  }, [messages, queueItems, visibleQueuedChats]);
+
+  const timelineEntries = useMemo(() => {
+    const messageEntries = [...displayedMessages, ...assistantMessagesFromQueue].map((message) => ({
+      type: 'message' as const,
+      id: message.id,
+      createdAt: message.createdAt,
+      message,
+    }));
+    const queuedEntries = visibleQueuedChats.map((queued) => ({
+      type: 'queued' as const,
+      id: queued.entry.localId,
+      createdAt: queued.entry.createdAt,
+      queued,
+    }));
+    return [...messageEntries, ...queuedEntries].sort((left, right) => {
+      const leftTime = Date.parse(left.createdAt);
+      const rightTime = Date.parse(right.createdAt);
+      const normalizedLeft = Number.isFinite(leftTime) ? leftTime : 0;
+      const normalizedRight = Number.isFinite(rightTime) ? rightTime : 0;
+      if (normalizedLeft !== normalizedRight) return normalizedLeft - normalizedRight;
+      return left.type === right.type ? 0 : left.type === 'message' ? -1 : 1;
+    });
+  }, [displayedMessages, assistantMessagesFromQueue, visibleQueuedChats]);
 
   const handleDeleteQueuedChat = async (entry: QueuedChatEntry) => {
     const item = queueItemForChat(entry, queueItems);
@@ -579,7 +657,7 @@ export function TeamChatRoute() {
           </div>
         )}
 
-        {!loading && displayedMessages.length === 0 && visibleQueuedChats.length === 0 && (
+        {!loading && timelineEntries.length === 0 && (
           <div className="flex flex-1 flex-col items-center justify-center py-15 text-center text-text-dim">
             <div className="text-[40px] mb-4 opacity-30">{'\u{1F4AC}'}</div>
             <div className="text-[15px] tracking-[-0.15px] font-normal text-text mb-1.5">No messages yet</div>
@@ -587,13 +665,54 @@ export function TeamChatRoute() {
           </div>
         )}
 
-        {displayedMessages.map((msg) => {
+        {timelineEntries.map((timelineEntry) => {
+          if (timelineEntry.type === 'queued') {
+            const { entry, showBubble } = timelineEntry.queued;
+            const item = entry.item ?? queueItemForChat(entry, queueItems);
+            const status = queueStatusLabel(entry, item, entry.deleted);
+            const canDelete = !entry.deleted && isCancelledQueueStatus(status);
+            const deleteId = entry.queueTaskId ?? (item ? queueDisplayItemDeleteId(item) : undefined);
+            return (
+              <div key={timelineEntry.id} className="msg-enter flex flex-col items-end">
+                {entry.deleted ? (
+                  <div className="max-w-[92%] rounded-[14px] border border-border bg-surface px-3 py-2 text-[13px] tracking-[-0.13px] text-text-dim">
+                    Message deleted
+                  </div>
+                ) : showBubble && (
+                  <ChatBubble
+                    role="user"
+                    tool="user"
+                    timestamp={new Date(entry.createdAt).getTime()}
+                  >
+                    {entry.text}
+                  </ChatBubble>
+                )}
+                <div className="mt-1 flex max-w-[92%] items-center justify-end gap-1.5">
+                  <span className={`rounded-full border px-2 py-0.5 text-[10px] tracking-[-0.1px] ${statusClass(status)}`}>
+                    {status}
+                  </span>
+                  {canDelete && (
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteQueuedChat(entry)}
+                      disabled={Boolean(deleteId && deletingQueueId === deleteId)}
+                      className="rounded-full border border-border bg-surface px-2 py-0.5 text-[10px] tracking-[-0.1px] text-text-dim"
+                    >
+                      {deleteId && deletingQueueId === deleteId ? 'Deleting...' : 'Delete'}
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          }
+
+          const msg = timelineEntry.message;
           const isUser = isUserMessage(msg);
           const orchestration = msg.orchestration;
           const route = formatRoute(orchestration?.route);
           const events = orchestration?.events ?? [];
           return (
-            <div key={msg.id} className={`msg-enter flex flex-col ${isUser ? 'items-end' : 'items-start'}`}>
+            <div key={timelineEntry.id} className={`msg-enter flex flex-col ${isUser ? 'items-end' : 'items-start'}`}>
               {!isUser && (
                 <div className="flex items-center gap-1.5 mb-1 ml-1">
                   <ProviderBadge provider={(msg.fromTool || 'claude') as 'claude' | 'codex' | 'gemini'} size={18} />
@@ -628,45 +747,6 @@ export function TeamChatRoute() {
                   )}
                 </details>
               )}
-            </div>
-          );
-        })}
-
-        {visibleQueuedChats.map(({ entry, showBubble }) => {
-          const item = entry.item ?? queueItemForChat(entry, queueItems);
-          const status = queueStatusLabel(entry, item, entry.deleted);
-          const canDelete = !entry.deleted && isCancelledQueueStatus(status);
-          const deleteId = entry.queueTaskId ?? (item ? queueDisplayItemDeleteId(item) : undefined);
-          return (
-            <div key={entry.localId} className="msg-enter flex flex-col items-end">
-              {entry.deleted ? (
-                <div className="max-w-[92%] rounded-[14px] border border-border bg-surface px-3 py-2 text-[13px] tracking-[-0.13px] text-text-dim">
-                  Message deleted
-                </div>
-              ) : showBubble && (
-                <ChatBubble
-                  role="user"
-                  tool="user"
-                  timestamp={new Date(entry.createdAt).getTime()}
-                >
-                  {entry.text}
-                </ChatBubble>
-              )}
-              <div className="mt-1 flex max-w-[92%] items-center justify-end gap-1.5">
-                <span className={`rounded-full border px-2 py-0.5 text-[10px] tracking-[-0.1px] ${statusClass(status)}`}>
-                  {status}
-                </span>
-                {canDelete && (
-                  <button
-                    type="button"
-                    onClick={() => handleDeleteQueuedChat(entry)}
-                    disabled={Boolean(deleteId && deletingQueueId === deleteId)}
-                    className="rounded-full border border-border bg-surface px-2 py-0.5 text-[10px] tracking-[-0.1px] text-text-dim"
-                  >
-                    {deleteId && deletingQueueId === deleteId ? 'Deleting...' : 'Delete'}
-                  </button>
-                )}
-              </div>
             </div>
           );
         })}

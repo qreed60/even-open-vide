@@ -126,7 +126,7 @@ export function TeamsRoute() {
     const nextSummary: Record<string, QueueSummary> = {};
     const nextBoardCount: Record<string, number> = {};
     for (const team of nextTeams) {
-      const summary = summaryForTeam([...queueData.items, ...queueData.resources], team.id);
+      const summary = summaryForTeam(queueData.items, team.id);
       if (summary.taskCount || summary.runningCount || summary.queuedCount || summary.waitingCount) {
         nextSummary[team.id] = summary;
       }

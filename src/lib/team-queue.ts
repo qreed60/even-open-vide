@@ -26,6 +26,13 @@ export interface QueueDisplayItem {
   runId?: string;
   queueTaskId?: string;
   queueRunIds?: string[];
+  clientMessageId?: string;
+  assistantText?: string;
+  assistantFrom?: string;
+  assistantStatus?: string;
+  assistantRoute?: string[];
+  assistantProvider?: string;
+  assistantModel?: string;
   primaryRunId?: string;
   primaryRunStatus?: string;
   primaryRunCurrentState?: string;
@@ -33,6 +40,8 @@ export interface QueueDisplayItem {
   linkedBoardTaskId?: string;
   linkedBoardTaskStatus?: string;
   priority?: string;
+  position?: string;
+  reorderable?: boolean;
   createdAt?: string;
   updatedAt?: string;
   startedAt?: string;
@@ -131,6 +140,44 @@ function readNestedRecord(record: AnyRecord, keys: string[]): AnyRecord | undefi
       const nested = value[key];
       if (isRecord(nested)) return nested;
     }
+  }
+  return undefined;
+}
+
+function readStringArray(record: AnyRecord | undefined, keys: string[], nested = false): string[] | undefined {
+  if (!record) return undefined;
+  for (const key of keys) {
+    const value = record[key];
+    if (Array.isArray(value)) {
+      const strings = value.map(toText).filter((entry): entry is string => Boolean(entry));
+      if (strings.length > 0) return strings;
+    }
+  }
+  if (!nested) return undefined;
+  for (const value of Object.values(record)) {
+    if (!isRecord(value)) continue;
+    const nestedValue = readStringArray(value, keys);
+    if (nestedValue?.length) return nestedValue;
+  }
+  return undefined;
+}
+
+function readBoolean(record: AnyRecord | undefined, keys: string[], nested = false): boolean | undefined {
+  if (!record) return undefined;
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'string') {
+      const normalized = value.trim().toLowerCase();
+      if (['true', 'yes', '1'].includes(normalized)) return true;
+      if (['false', 'no', '0'].includes(normalized)) return false;
+    }
+  }
+  if (!nested) return undefined;
+  for (const value of Object.values(record)) {
+    if (!isRecord(value)) continue;
+    const nestedValue = readBoolean(value, keys);
+    if (nestedValue !== undefined) return nestedValue;
   }
   return undefined;
 }
@@ -358,6 +405,8 @@ function normalizeItem(
   const id = explicitId ?? resourceKey ?? resourceIdentity ?? `${kind}-${teamId ?? 'global'}-${index}`;
   const description = displayDescription(value, parentQueueTask);
   const title = displayTitle(value, description, id, kind, parentQueueTask);
+  const metadata = isRecord(value.metadata) ? value.metadata : undefined;
+  const queuedChatResult = readNestedRecord(value, ['queuedChatResult', 'queued_chat_result']);
   const linkedQueueTaskId = readNestedText(value, ['taskId', 'task_id']) ?? (parentQueueTask ? readText(parentQueueTask, ['id', 'taskId', 'task_id']) : undefined);
   const linkedQueueTaskRef = linkedQueueTaskId ? queueTaskBoardRefs.get(linkedQueueTaskId) : undefined;
   const linkedBoardTaskId = readNestedText(value, ['boardTaskId', 'board_task_id']) ?? linkedQueueTaskRef?.boardTaskId;
@@ -387,15 +436,30 @@ function normalizeItem(
     runId: kind === 'run' ? id : undefined,
     queueTaskId: kind === 'task' ? id : linkedQueueTaskId,
     queueRunIds: runIds,
+    clientMessageId: readNestedText(value, ['clientMessageId', 'client_message_id', 'messageId', 'message_id']),
+    assistantText: readableText(queuedChatResult, ['assistantText', 'assistant_text'])
+      ?? readableText(value, ['assistantText', 'assistant_text'], true),
+    assistantFrom: readableText(queuedChatResult, ['memberName', 'member_name', 'from'])
+      ?? readableText(value, ['memberName', 'member_name', 'from'], true),
+    assistantStatus: readableText(queuedChatResult, ['finalStatus', 'final_status', 'status'])
+      ?? readableText(value, ['finalStatus', 'final_status'], true),
+    assistantRoute: readStringArray(queuedChatResult, ['route'])
+      ?? readStringArray(value, ['route'], true),
+    assistantProvider: readableText(queuedChatResult, ['provider', 'tool'])
+      ?? readableText(value, ['provider', 'tool'], true),
+    assistantModel: readableText(queuedChatResult, ['model', 'modelId', 'model_id'])
+      ?? readableText(value, ['model', 'modelId', 'model_id'], true),
     linkedQueueTaskId,
     linkedBoardTaskId,
     linkedBoardTaskStatus: linkedBoardTaskId ? boardTaskStatuses.get(linkedBoardTaskId) ?? linkedQueueTaskRef?.boardTaskStatus : undefined,
-    priority: readableText(value, ['priority'], true),
+    priority: readableText(value, ['priority', 'queuePriority', 'queue_priority'], true),
+    position: readableText(value, ['position', 'order', 'queuePosition', 'queue_position', 'sortIndex', 'sort_index'], true),
+    reorderable: readBoolean(value, ['reorderable', 'canReorder', 'can_reorder', 'supportsReorder', 'supports_reorder'], true),
     createdAt: readNestedText(value, ['createdAt', 'created_at', 'queuedAt', 'queued_at']),
     updatedAt: readNestedText(value, ['updatedAt', 'updated_at']),
     startedAt: readNestedText(value, ['startedAt', 'started_at', 'dispatchedAt', 'dispatched_at']),
     finishedAt: readNestedText(value, ['finishedAt', 'finished_at', 'completedAt', 'completed_at', 'endedAt', 'ended_at']),
-    metadata: isRecord(value.metadata) ? value.metadata : undefined,
+    metadata,
   };
 }
 
@@ -518,6 +582,24 @@ export function queueDisplayItemCanDelete(item: QueueDisplayItem): boolean {
   return TERMINAL_DELETE_STATUSES.some((part) => normalized.includes(part));
 }
 
+export function queueDisplayItemReorderTarget(item: QueueDisplayItem): { queueTaskId: string } | null {
+  const queueTaskId = item.queueTaskId ?? item.linkedQueueTaskId ?? (item.kind === 'task' ? item.id : undefined);
+  if (!queueTaskId) return null;
+  return { queueTaskId };
+}
+
+export function queueDisplayItemCanReorder(item: QueueDisplayItem): boolean {
+  if (!queueDisplayItemReorderTarget(item)) return false;
+  if (item.reorderable === false) return false;
+  const normalized = item.status.toLowerCase().replace(/[\s-]+/g, '_');
+  if (queueDisplayItemIsRunning(item)) return false;
+  if (['completed', 'complete', 'failed', 'cancelled', 'canceled', 'interrupted', 'deleted'].some((part) => normalized.includes(part))) return false;
+  return item.reorderable === true
+    || ['queued', 'waiting', 'waiting_for_team_slot', 'waiting_for_model', 'blocked'].some((part) => normalized.includes(part))
+    || item.category === 'queued'
+    || item.category === 'waiting';
+}
+
 function safeParseDeletedQueueRecords(value: string | null): DeletedQueueItemRecord[] {
   if (!value) return [];
   try {
@@ -585,19 +667,18 @@ export function saveDeletedQueueChatRecord(teamId: string, record: DeletedQueueI
 }
 
 export function groupQueueDisplayItems(items: QueueDisplayItem[], resources: QueueDisplayItem[] = []): QueueDisplayGroups {
+  void resources;
   return {
     running: items.filter((item) => item.category === 'running'),
     queued: items.filter((item) => item.category === 'queued'),
-    waiting: [
-      ...items.filter((item) => item.category === 'waiting'),
-      ...resources,
-    ],
+    waiting: items.filter((item) => item.category === 'waiting'),
     history: items.filter((item) => item.category === 'history'),
     other: items.filter((item) => item.category === 'other'),
   };
 }
 
 export function summarizeQueue(items: QueueDisplayItem[], resources: QueueDisplayItem[] = []): QueueSummary {
+  void resources;
   const groups = groupQueueDisplayItems(items, resources);
   return {
     taskCount: items.filter((item) => item.kind === 'task').length,
