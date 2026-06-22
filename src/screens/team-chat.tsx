@@ -172,7 +172,7 @@ function queuedChatFromResponse(res: RpcResponse, text: string, to: string, clie
     .concat(queueTask ? readStringArray(queueTask.runIds) : []);
   const uniqueRunIds = queueRunIds.filter((runId, index, allRunIds) => allRunIds.indexOf(runId) === index);
   return {
-    localId: queueTaskId ? `queued-chat-${queueTaskId}` : `queued-chat-${Date.now().toString(36)}`,
+    localId: `queued-chat-${clientMessageId}`,
     text,
     to,
     createdAt: (queueTask ? readString(queueTask.createdAt) ?? readString(queueTask.queuedAt) : undefined) ?? new Date().toISOString(),
@@ -182,31 +182,45 @@ function queuedChatFromResponse(res: RpcResponse, text: string, to: string, clie
   };
 }
 
+function queuedChatEntryKeys(entry: QueuedChatEntry): string[] {
+  return [
+    entry.clientMessageId,
+    entry.queueTaskId,
+    ...entry.queueRunIds,
+    entry.localId,
+  ].filter((key, index, allKeys): key is string => Boolean(key) && allKeys.indexOf(key) === index);
+}
+
+function queuedChatItemKeys(item: QueueDisplayItem): string[] {
+  return [
+    item.clientMessageId,
+    item.queueTaskId,
+    item.linkedQueueTaskId,
+    item.kind === 'task' ? item.id : undefined,
+    item.primaryRunId,
+    item.runId,
+    item.kind === 'run' ? item.id : undefined,
+    ...(item.queueRunIds ?? []),
+    ...(item.runIds ?? []),
+  ].filter((key, index, allKeys): key is string => Boolean(key) && allKeys.indexOf(key) === index);
+}
+
 function queuedChatEntryKey(entry: QueuedChatEntry): string {
-  return entry.queueTaskId ?? entry.clientMessageId ?? entry.localId;
+  return queuedChatEntryKeys(entry)[0] ?? entry.localId;
 }
 
 function mergeQueuedChatEntries(current: QueuedChatEntry[], next: QueuedChatEntry): QueuedChatEntry[] {
-  const nextKey = queuedChatEntryKey(next);
-  const existingIndex = current.findIndex((entry) => queuedChatEntryKey(entry) === nextKey);
+  const nextKeys = new Set(queuedChatEntryKeys(next));
+  const existingIndex = current.findIndex((entry) => queuedChatEntryKeys(entry).some((key) => nextKeys.has(key)));
   if (existingIndex === -1) return [...current, next];
   return current.map((entry, index) => (index === existingIndex ? { ...entry, ...next } : entry));
 }
 
 function queueItemForChat(entry: QueuedChatEntry, items: QueueDisplayItem[]): QueueDisplayItem | undefined {
+  const entryKeys = new Set(queuedChatEntryKeys(entry));
   return items.find((item) => {
-    if (entry.queueTaskId && (
-      item.id === entry.queueTaskId
-      || item.queueTaskId === entry.queueTaskId
-      || item.linkedQueueTaskId === entry.queueTaskId
-    )) return true;
-    return entry.queueRunIds.some((runId) => (
-      item.id === runId
-      || item.runId === runId
-      || item.primaryRunId === runId
-      || item.runIds?.includes(runId)
-      || item.queueRunIds?.includes(runId)
-    ));
+    if (queuedChatItemKeys(item).some((key) => entryKeys.has(key))) return true;
+    return false;
   });
 }
 
@@ -282,6 +296,32 @@ function queuedChatEntryFromItem(item: QueueDisplayItem): QueuedChatEntry {
   };
 }
 
+function queuedChatCanonicalKey(entry: QueuedChatEntry, item?: QueueDisplayItem): string {
+  const itemKeys = item ? queuedChatItemKeys(item) : [];
+  return entry.clientMessageId
+    ?? item?.clientMessageId
+    ?? entry.queueTaskId
+    ?? item?.queueTaskId
+    ?? item?.linkedQueueTaskId
+    ?? (item?.kind === 'task' ? item.id : undefined)
+    ?? entry.queueRunIds[0]
+    ?? item?.primaryRunId
+    ?? item?.runId
+    ?? itemKeys[0]
+    ?? entry.localId;
+}
+
+function nearTimestamp(left?: string, right?: string): boolean {
+  const leftTime = Date.parse(left ?? '');
+  const rightTime = Date.parse(right ?? '');
+  if (!Number.isFinite(leftTime) || !Number.isFinite(rightTime)) return false;
+  return Math.abs(leftTime - rightTime) <= 5000;
+}
+
+function isQueueBacked(entry: VisibleQueuedChatEntry): boolean {
+  return Boolean(entry.item || entry.queueTaskId || entry.queueRunIds.length > 0);
+}
+
 function isUserMessage(msg: TeamMessageSummary): boolean {
   if (msg.from === 'user' || msg.from === 'you') return true;
   if (msg.fromTool && AI_TOOLS.includes(msg.fromTool)) return false;
@@ -355,6 +395,7 @@ export function TeamChatRoute() {
   const [runDetails, setRunDetails] = useState<Record<string, OrchestratorRunDetail>>({});
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const sendingRef = useRef(false);
 
   const refresh = async () => {
     try {
@@ -429,9 +470,10 @@ export function TeamChatRoute() {
   }, [autoScroll, messages, queuedChats, queueItems]);
 
   const handleSend = async () => {
-    if (!draft.trim() || sending) return;
+    if (!draft.trim() || sendingRef.current) return;
     const text = draft.trim();
     const clientMessageId = newClientMessageId();
+    sendingRef.current = true;
     setSending(true);
     setQueueError('');
     try {
@@ -454,6 +496,7 @@ export function TeamChatRoute() {
     } catch (error) {
       setQueueError(error instanceof Error ? error.message : String(error));
     }
+    sendingRef.current = false;
     setSending(false);
   };
 
@@ -464,48 +507,54 @@ export function TeamChatRoute() {
         .filter((message) => isUserMessage(message))
         .map((message) => `${message.to}:${message.text}`),
     );
-    const byTaskId = new Map<string, VisibleQueuedChatEntry>();
+    const byKey = new Map<string, VisibleQueuedChatEntry>();
+    const aliases = new Map<string, string>();
     const deletedIds = new Set(deletedQueuedChats.map((entry) => entry.id));
-    const fallbackEntries: VisibleQueuedChatEntry[] = [];
+
+    const upsertEntry = (entry: VisibleQueuedChatEntry, item?: QueueDisplayItem) => {
+      const keys = [
+        ...queuedChatEntryKeys(entry),
+        ...(item ? queuedChatItemKeys(item) : []),
+      ].filter((key, index, allKeys): key is string => Boolean(key) && allKeys.indexOf(key) === index);
+      const existingKey = keys.map((key) => aliases.get(key) ?? key).find((key) => byKey.has(key));
+      const canonicalKey = existingKey ?? queuedChatCanonicalKey(entry, item);
+      const existingEntry = byKey.get(canonicalKey);
+      const nextEntry = existingEntry ? { ...existingEntry, ...entry, item: item ?? entry.item ?? existingEntry.item } : { ...entry, item: item ?? entry.item };
+      byKey.set(canonicalKey, nextEntry);
+      for (const key of keys) aliases.set(key, canonicalKey);
+    };
 
     for (const entry of queuedChats) {
       const item = queueItemForChat(entry, queueItems);
-      const key = entry.queueTaskId ?? item?.queueTaskId ?? item?.linkedQueueTaskId;
-      const nextEntry = { ...entry, item };
-      if (key) {
-        byTaskId.set(key, nextEntry);
-      } else {
-        fallbackEntries.push(nextEntry);
-      }
+      upsertEntry({ ...entry, item }, item);
     }
 
     for (const item of queueItems) {
       if (!queueDisplayItemIsChat(item)) continue;
       const entry = queuedChatEntryFromItem(item);
-      const key = queueDisplayItemDeleteId(item) ?? entry.queueTaskId ?? entry.localId;
-      const existingEntry = byTaskId.get(key);
-      byTaskId.set(key, existingEntry
-        ? { ...existingEntry, ...entry, item, deleted: deletedIds.has(key) }
-        : { ...entry, item, deleted: deletedIds.has(key) });
+      const key = queuedChatCanonicalKey(entry, item);
+      upsertEntry({ ...entry, item, deleted: deletedIds.has(key) || queuedChatItemKeys(item).some((itemKey) => deletedIds.has(itemKey)) }, item);
     }
 
     for (const record of deletedQueuedChats) {
       if (!record.text) continue;
-      const existingEntry = byTaskId.get(record.id);
-      byTaskId.set(record.id, existingEntry
-        ? { ...existingEntry, deleted: true, text: record.text, to: record.to ?? existingEntry.to }
-        : deletedChatEntryFromRecord(record));
+      upsertEntry(deletedChatEntryFromRecord(record));
     }
 
-    const entries = [
-      ...fallbackEntries,
-      ...Array.from(byTaskId.entries()).map(([key, entry]) => ({
+    const entries = Array.from(byKey.entries()).map(([key, entry]) => ({
         ...entry,
         deleted: entry.deleted ?? deletedIds.has(key),
-      })),
-    ];
+      }));
+    const queueBackedEntries = entries.filter(isQueueBacked);
+    const dedupedEntries = entries.filter((entry) => {
+      if (isQueueBacked(entry) || entry.clientMessageId || entry.queueTaskId || entry.queueRunIds.length > 0) return true;
+      return !queueBackedEntries.some((queueBacked) => (
+        queueBacked.text === entry.text
+        && nearTimestamp(queueBacked.createdAt, entry.createdAt)
+      ));
+    });
 
-    return entries.sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt)).map((entry) => ({
+    return dedupedEntries.sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt)).map((entry) => ({
       entry,
       showBubble: !persistedUserMessages.has(`${entry.to}:${entry.text}`),
     }));

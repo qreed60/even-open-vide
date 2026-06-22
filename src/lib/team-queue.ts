@@ -395,7 +395,8 @@ function normalizeItem(
   const teamId = readNestedText(value, ['teamId', 'team_id']);
   const explicitId = kind === 'run'
     ? readNestedText(value, ['id', 'runId', 'run_id'])
-    : readNestedText(value, ['id', 'taskId', 'task_id', 'resourceKey']);
+      ?? readNestedText(value, ['queueRunId', 'queue_run_id'])
+    : readNestedText(value, ['id', 'taskId', 'task_id', 'queueTaskId', 'queue_task_id', 'resourceKey']);
   const resourceKey = readNestedText(value, ['resourceKey', 'resource_key', 'key']) ?? readNestedText(value, ['providerModelKey']);
   const provider = readNestedText(value, ['provider', 'tool']);
   const model = readNestedText(value, ['model', 'modelId', 'model_id']);
@@ -407,12 +408,18 @@ function normalizeItem(
   const title = displayTitle(value, description, id, kind, parentQueueTask);
   const metadata = isRecord(value.metadata) ? value.metadata : undefined;
   const queuedChatResult = readNestedRecord(value, ['queuedChatResult', 'queued_chat_result']);
-  const linkedQueueTaskId = readNestedText(value, ['taskId', 'task_id']) ?? (parentQueueTask ? readText(parentQueueTask, ['id', 'taskId', 'task_id']) : undefined);
+  const linkedQueueTaskId = readNestedText(value, ['taskId', 'task_id', 'queueTaskId', 'queue_task_id'])
+    ?? (parentQueueTask ? readText(parentQueueTask, ['id', 'taskId', 'task_id', 'queueTaskId', 'queue_task_id']) : undefined);
   const linkedQueueTaskRef = linkedQueueTaskId ? queueTaskBoardRefs.get(linkedQueueTaskId) : undefined;
   const linkedBoardTaskId = readNestedText(value, ['boardTaskId', 'board_task_id']) ?? linkedQueueTaskRef?.boardTaskId;
   const runIds = Array.isArray(value.runIds)
     ? value.runIds.map((entry) => toText(entry)).filter((entry): entry is string => Boolean(entry))
     : undefined;
+  const queueRunIds = [
+    ...(runIds ?? []),
+    readNestedText(value, ['queueRunId', 'queue_run_id']),
+    ...(readStringArray(value, ['queueRunIds', 'queue_run_ids'], true) ?? []),
+  ].filter((runId, runIndex, allRunIds): runId is string => Boolean(runId) && allRunIds.indexOf(runId) === runIndex);
   return {
     id,
     kind,
@@ -432,10 +439,10 @@ function normalizeItem(
     resourceKey,
     provider,
     model,
-    runIds,
+    runIds: runIds ?? (queueRunIds.length > 0 ? queueRunIds : undefined),
     runId: kind === 'run' ? id : undefined,
     queueTaskId: kind === 'task' ? id : linkedQueueTaskId,
-    queueRunIds: runIds,
+    queueRunIds: queueRunIds.length > 0 ? queueRunIds : undefined,
     clientMessageId: readNestedText(value, ['clientMessageId', 'client_message_id', 'messageId', 'message_id']),
     assistantText: readableText(queuedChatResult, ['assistantText', 'assistant_text'])
       ?? readableText(value, ['assistantText', 'assistant_text'], true),
@@ -466,6 +473,9 @@ function normalizeItem(
 function mergeTaskRunPairs(items: QueueDisplayItem[]): QueueDisplayItem[] {
   const runs = items.filter((item) => item.kind === 'run');
   const runsById = new Map(runs.map((run) => [run.id, run]));
+  const taskIds = new Set(items
+    .filter((item) => item.kind === 'task')
+    .map((item) => item.queueTaskId ?? item.id));
   const mergedRunIds = new Set<string>();
 
   const mergedItems = items.map((item) => {
@@ -502,7 +512,7 @@ function mergeTaskRunPairs(items: QueueDisplayItem[]): QueueDisplayItem[] {
 
   const seenLogicalItems = new Set<string>();
   return mergedItems
-    .filter((item) => item.kind !== 'run' || !mergedRunIds.has(item.id))
+    .filter((item) => item.kind !== 'run' || (!mergedRunIds.has(item.id) && !(item.linkedQueueTaskId && taskIds.has(item.linkedQueueTaskId))))
     .filter((item) => {
       const logicalId = item.kind === 'run' && item.linkedQueueTaskId ? item.linkedQueueTaskId : item.id;
       const key = `${item.kind}:${logicalId}:${item.teamId ?? ''}`;
