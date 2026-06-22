@@ -28,6 +28,11 @@ interface TeamMessageSummary {
   fromTool?: string;
   to: string;
   text: string;
+  source?: string;
+  clientMessageId?: string;
+  queueTaskId?: string;
+  queueRunId?: string;
+  queueRunIds?: string[];
   createdAt: string;
   orchestration?: OrchestrationMetadata;
 }
@@ -164,6 +169,10 @@ function readStringArray(value: unknown): string[] {
   return value.map(readString).filter((entry): entry is string => Boolean(entry));
 }
 
+function normalizeChatText(value?: string): string {
+  return (value ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
 function queuedChatFromResponse(res: RpcResponse, text: string, to: string, clientMessageId: string): QueuedChatEntry {
   const record = res as Record<string, unknown>;
   const task = (record.task && typeof record.task === 'object') ? record.task as Record<string, unknown> : null;
@@ -197,18 +206,7 @@ function queuedChatEntryKeys(entry: QueuedChatEntry): string[] {
 }
 
 function queuedChatMessageKeys(message: TeamMessageSummary): string[] {
-  const record = message as TeamMessageSummary & {
-    clientMessageId?: string;
-    client_message_id?: string;
-    messageId?: string;
-    message_id?: string;
-    queueTaskId?: string;
-    queue_task_id?: string;
-    queueRunId?: string;
-    queue_run_id?: string;
-    queueRunIds?: string[];
-    queue_run_ids?: string[];
-  };
+  const record = message as TeamMessageSummary & { client_message_id?: string; messageId?: string; message_id?: string; queue_task_id?: string; queue_run_id?: string; queue_run_ids?: string[] };
   return [
     record.clientMessageId,
     record.client_message_id,
@@ -347,11 +345,11 @@ function queuedChatCanonicalKey(entry: QueuedChatEntry, item?: QueueDisplayItem)
     ?? entry.localId;
 }
 
-function nearTimestamp(left?: string, right?: string): boolean {
+function nearTimestamp(left?: string, right?: string, windowMs = 30000): boolean {
   const leftTime = Date.parse(left ?? '');
   const rightTime = Date.parse(right ?? '');
   if (!Number.isFinite(leftTime) || !Number.isFinite(rightTime)) return false;
-  return Math.abs(leftTime - rightTime) <= 15000;
+  return Math.abs(leftTime - rightTime) <= windowMs;
 }
 
 function isQueueBacked(entry: VisibleQueuedChatEntry): boolean {
@@ -368,9 +366,15 @@ function userMessageMatchesQueuedChat(message: TeamMessageSummary, queued: Visib
   const messageKeys = queuedChatMessageKeys(message);
   const queuedKeys = queuedChatEntryKeys(queued.entry).concat(queued.entry.item ? queuedChatItemKeys(queued.entry.item) : []);
   if (messageKeys.some((key) => queuedKeys.includes(key))) return true;
-  return message.text === queued.entry.text
-    && recipientsMatch(message.to, queued.entry.to)
-    && nearTimestamp(message.createdAt, queued.entry.createdAt);
+  const messageText = normalizeChatText(message.text);
+  if (!messageText || messageText !== normalizeChatText(queued.entry.text)) return false;
+  if (!recipientsMatch(message.to, queued.entry.to)) return false;
+  if (message.source === 'queued_chat') return true;
+  return [
+    queued.entry.item?.startedAt,
+    queued.entry.item?.updatedAt,
+    queued.entry.createdAt,
+  ].some((timestamp) => nearTimestamp(message.createdAt, timestamp));
 }
 
 function isUserMessage(msg: TeamMessageSummary): boolean {
@@ -424,6 +428,25 @@ function queueAssistantMessage(item: QueueDisplayItem | undefined, parentKey: st
       }
       : undefined,
   };
+}
+
+function assistantMessageMatchesQueuedChat(message: TeamMessageSummary, queued: VisibleQueuedChatTimelineEntry): boolean {
+  if (isUserMessage(message)) return false;
+  const item = queued.entry.item;
+  const queueAssistant = queueAssistantMessage(item, queued.key);
+  if (!queueAssistant) return false;
+  const messageKeys = queuedChatMessageKeys(message);
+  const queuedKeys = queuedChatEntryKeys(queued.entry).concat(item ? queuedChatItemKeys(item) : []);
+  if (messageKeys.some((key) => queuedKeys.includes(key))) return true;
+  const messageText = normalizeChatText(message.text);
+  if (!messageText || messageText !== normalizeChatText(queueAssistant.text)) return false;
+  if (message.source === 'queued_chat_result') return true;
+  return [
+    item?.finishedAt,
+    item?.updatedAt,
+    item?.startedAt,
+    queued.entry.createdAt,
+  ].some((timestamp) => nearTimestamp(message.createdAt, timestamp));
 }
 
 export function TeamChatRoute() {
@@ -635,21 +658,18 @@ export function TeamChatRoute() {
   const displayedMessages = useMemo(() => (
     messages.filter((message) => {
       if (isUserMessage(message) && deletedQueuedChatTexts.has(message.text)) return false;
-      return !visibleQueuedChats.some((queued) => userMessageMatchesQueuedChat(message, queued));
+      if (isUserMessage(message)) {
+        return !visibleQueuedChats.some((queued) => userMessageMatchesQueuedChat(message, queued));
+      }
+      return !visibleQueuedChats.some((queued) => assistantMessageMatchesQueuedChat(message, queued));
     })
   ), [messages, deletedQueuedChatTexts, visibleQueuedChats]);
 
   const assistantMessagesFromQueue = useMemo(() => {
-    const persistedAssistantMessages = new Set(
-      messages
-        .filter((message) => !isUserMessage(message))
-        .map((message) => `${message.from}:${message.text}`),
-    );
     return visibleQueuedChats
       .map(({ key, entry }) => queueAssistantMessage(entry.item ?? queueItemForChat(entry, queueItems), key))
-      .filter((message): message is TeamMessageSummary => Boolean(message))
-      .filter((message) => !persistedAssistantMessages.has(`${message.from}:${message.text}`));
-  }, [messages, queueItems, visibleQueuedChats]);
+      .filter((message): message is TeamMessageSummary => Boolean(message));
+  }, [queueItems, visibleQueuedChats]);
 
   const timelineEntries = useMemo(() => {
     const messageEntries = [...displayedMessages, ...assistantMessagesFromQueue].map((message) => ({
