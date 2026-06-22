@@ -408,6 +408,8 @@ function normalizeItem(
   const title = displayTitle(value, description, id, kind, parentQueueTask);
   const metadata = isRecord(value.metadata) ? value.metadata : undefined;
   const queuedChatResult = readNestedRecord(value, ['queuedChatResult', 'queued_chat_result']);
+  const queuedBoardResult = readNestedRecord(value, ['queuedBoardResult', 'queued_board_result']);
+  const assistantResult = queuedBoardResult ?? queuedChatResult;
   const sourceRef = readNestedRecord(value, ['sourceRef', 'source_ref'])
     ?? (parentQueueTask ? readNestedRecord(parentQueueTask, ['sourceRef', 'source_ref']) : undefined);
   const linkedQueueTaskId = readNestedText(value, ['taskId', 'task_id', 'queueTaskId', 'queue_task_id'])
@@ -447,17 +449,17 @@ function normalizeItem(
     queueRunIds: queueRunIds.length > 0 ? queueRunIds : undefined,
     clientMessageId: readNestedText(value, ['clientMessageId', 'client_message_id', 'messageId', 'message_id'])
       ?? (sourceRef ? readText(sourceRef, ['clientMessageId', 'client_message_id', 'messageId', 'message_id']) : undefined),
-    assistantText: readableText(queuedChatResult, ['assistantText', 'assistant_text'])
+    assistantText: readableText(assistantResult, ['assistantText', 'assistant_text', 'resultSummary', 'result_summary'])
       ?? readableText(value, ['assistantText', 'assistant_text'], true),
-    assistantFrom: readableText(queuedChatResult, ['memberName', 'member_name', 'from'])
+    assistantFrom: readableText(assistantResult, ['memberName', 'member_name', 'from'])
       ?? readableText(value, ['memberName', 'member_name', 'from'], true),
-    assistantStatus: readableText(queuedChatResult, ['finalStatus', 'final_status', 'status'])
+    assistantStatus: readableText(assistantResult, ['finalStatus', 'final_status', 'status', 'resultStatus', 'result_status'])
       ?? readableText(value, ['finalStatus', 'final_status'], true),
-    assistantRoute: readStringArray(queuedChatResult, ['route'])
+    assistantRoute: readStringArray(assistantResult, ['route', 'resultRoute', 'result_route'])
       ?? readStringArray(value, ['route'], true),
-    assistantProvider: readableText(queuedChatResult, ['provider', 'tool'])
+    assistantProvider: readableText(assistantResult, ['provider', 'tool', 'resultProvider', 'result_provider'])
       ?? readableText(value, ['provider', 'tool'], true),
-    assistantModel: readableText(queuedChatResult, ['model', 'modelId', 'model_id'])
+    assistantModel: readableText(assistantResult, ['model', 'modelId', 'model_id', 'resultModel', 'result_model'])
       ?? readableText(value, ['model', 'modelId', 'model_id'], true),
     linkedQueueTaskId,
     linkedBoardTaskId,

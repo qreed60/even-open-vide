@@ -306,6 +306,11 @@ function QueueItemCard({
               {item.excerpt ?? item.description}
             </p>
           )}
+          {item.assistantText && (
+            <p className="mt-2 rounded-[6px] border border-border bg-surface/60 px-2 py-1.5 text-[12px] tracking-[-0.12px] text-text line-clamp-3">
+              {item.assistantText}
+            </p>
+          )}
           {meta.length > 0 && <p className="data-mono mt-1">{meta.join(' · ')}</p>}
           {(item.route || item.currentMember || item.currentState || item.primaryRunCurrentState) && (
             <p className="data-mono mt-1">

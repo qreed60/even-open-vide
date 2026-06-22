@@ -28,6 +28,13 @@ export interface TeamBoardItem {
   title: string;
   description?: string;
   excerpt?: string;
+  resultSummary?: string;
+  resultStatus?: string;
+  resultRoute?: string[];
+  resultMemberName?: string;
+  resultProvider?: string;
+  resultModel?: string;
+  resultDiagnostics?: string;
   source?: string;
   executionStatus: BoardExecutionStatus | string;
   reviewStatus: BoardReviewStatus | string;
@@ -119,12 +126,12 @@ function isRawIdText(value: string | undefined): boolean {
   return Boolean(value && RAW_ID_PATTERN.test(value));
 }
 
-function excerptText(value: string | undefined): string | undefined {
+function excerptText(value: string | undefined, maxLength = DESCRIPTION_MAX_LENGTH): string | undefined {
   if (!value) return undefined;
   const compacted = value.replace(/\s+/g, ' ').trim();
   if (!compacted) return undefined;
-  if (compacted.length <= DESCRIPTION_MAX_LENGTH) return compacted;
-  return `${compacted.slice(0, DESCRIPTION_MAX_LENGTH - 1).trimEnd()}...`;
+  if (compacted.length <= maxLength) return compacted;
+  return `${compacted.slice(0, maxLength - 1).trimEnd()}...`;
 }
 
 export function normalizeBoardExecutionStatus(value: unknown): NormalizedBoardExecutionStatus {
@@ -168,6 +175,7 @@ function normalizeBoardItem(value: unknown): TeamBoardItem | null {
   const id = readText(value, ['id', 'itemId', 'item_id', 'boardItemId', 'board_item_id']);
   if (!id) return null;
   const description = readText(value, ['description', 'body', 'details']);
+  const resultSummary = readText(value, ['resultSummary', 'result_summary', 'assistantText', 'assistant_text']);
   const title = readText(value, ['title', 'subject', 'name']);
   return {
     id,
@@ -175,6 +183,13 @@ function normalizeBoardItem(value: unknown): TeamBoardItem | null {
     title: title && !isRawIdText(title) ? title : 'Board item',
     description,
     excerpt: excerptText(description),
+    resultSummary: excerptText(resultSummary, 260),
+    resultStatus: readText(value, ['resultStatus', 'result_status', 'finalStatus', 'final_status']),
+    resultRoute: readStringArray(value, ['resultRoute', 'result_route', 'route']),
+    resultMemberName: readText(value, ['resultMemberName', 'result_member_name', 'memberName', 'member_name']),
+    resultProvider: readText(value, ['resultProvider', 'result_provider', 'provider', 'tool']),
+    resultModel: readText(value, ['resultModel', 'result_model', 'model']),
+    resultDiagnostics: excerptText(readText(value, ['resultDiagnostics', 'result_diagnostics', 'diagnostics']), 260),
     source: isRawIdText(readText(value, ['source'])) ? undefined : readText(value, ['source']),
     executionStatus: normalizeBoardExecutionStatus(readText(value, ['executionStatus', 'execution_status'])),
     reviewStatus: readText(value, ['reviewStatus', 'review_status']) ?? 'not_required',

@@ -440,6 +440,12 @@ export function TeamDetailRoute() {
                           item.source,
                           item.priority ? `priority ${item.priority}` : null,
                         ].filter(Boolean);
+                        const resultMeta = [
+                          item.resultStatus,
+                          item.resultMemberName ? `by ${item.resultMemberName}` : null,
+                          item.resultProvider && item.resultModel ? `${item.resultProvider}:${item.resultModel}` : item.resultProvider ?? item.resultModel,
+                          item.resultRoute?.length ? `route ${item.resultRoute.join(' -> ')}` : null,
+                        ].filter(Boolean);
                         const memberMeta = [
                           item.assignedMembers.length ? `assigned ${item.assignedMembers.join(', ')}` : null,
                           item.reviewerMembers.length ? `reviewers ${item.reviewerMembers.join(', ')}` : null,
@@ -460,6 +466,12 @@ export function TeamDetailRoute() {
                             )}
                             {memberMeta.length > 0 && <p className="data-mono mt-2">{memberMeta.join(' · ')}</p>}
                             {queueMeta.length > 0 && <p className="data-mono mt-1 text-text-dim">{queueMeta.join(' · ')}</p>}
+                            {item.resultSummary && (
+                              <p className="mt-2 rounded-[6px] border border-border bg-surface/60 px-2 py-1.5 text-[11px] tracking-[-0.11px] text-text line-clamp-4">
+                                {item.resultSummary}
+                              </p>
+                            )}
+                            {resultMeta.length > 0 && <p className="data-mono mt-1 text-text-dim">{resultMeta.join(' · ')}</p>}
                             {(item.blockedReason || item.reviewFeedback) && (
                               <p className="text-[11px] tracking-[-0.11px] text-text-dim mt-2">
                                 {[item.blockedReason ? `Blocked: ${item.blockedReason}` : null, item.reviewFeedback ? `Review: ${item.reviewFeedback}` : null].filter(Boolean).join(' · ')}
