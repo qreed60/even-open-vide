@@ -83,6 +83,11 @@ interface VisibleQueuedChatEntry extends QueuedChatEntry {
   item?: QueueDisplayItem;
 }
 
+interface VisibleQueuedChatTimelineEntry {
+  key: string;
+  entry: VisibleQueuedChatEntry;
+}
+
 function formatRecipient(to: string): string {
   if (to === '*' || to === 'team') return 'team';
   if (to === 'user' || to === 'you') return 'you';
@@ -191,6 +196,33 @@ function queuedChatEntryKeys(entry: QueuedChatEntry): string[] {
   ].filter((key, index, allKeys): key is string => Boolean(key) && allKeys.indexOf(key) === index);
 }
 
+function queuedChatMessageKeys(message: TeamMessageSummary): string[] {
+  const record = message as TeamMessageSummary & {
+    clientMessageId?: string;
+    client_message_id?: string;
+    messageId?: string;
+    message_id?: string;
+    queueTaskId?: string;
+    queue_task_id?: string;
+    queueRunId?: string;
+    queue_run_id?: string;
+    queueRunIds?: string[];
+    queue_run_ids?: string[];
+  };
+  return [
+    record.clientMessageId,
+    record.client_message_id,
+    record.messageId,
+    record.message_id,
+    record.queueTaskId,
+    record.queue_task_id,
+    record.queueRunId,
+    record.queue_run_id,
+    ...(Array.isArray(record.queueRunIds) ? record.queueRunIds : []),
+    ...(Array.isArray(record.queue_run_ids) ? record.queue_run_ids : []),
+  ].filter((key, index, allKeys): key is string => Boolean(key) && allKeys.indexOf(key) === index);
+}
+
 function queuedChatItemKeys(item: QueueDisplayItem): string[] {
   return [
     item.clientMessageId,
@@ -205,15 +237,19 @@ function queuedChatItemKeys(item: QueueDisplayItem): string[] {
   ].filter((key, index, allKeys): key is string => Boolean(key) && allKeys.indexOf(key) === index);
 }
 
-function queuedChatEntryKey(entry: QueuedChatEntry): string {
-  return queuedChatEntryKeys(entry)[0] ?? entry.localId;
-}
-
 function mergeQueuedChatEntries(current: QueuedChatEntry[], next: QueuedChatEntry): QueuedChatEntry[] {
   const nextKeys = new Set(queuedChatEntryKeys(next));
   const existingIndex = current.findIndex((entry) => queuedChatEntryKeys(entry).some((key) => nextKeys.has(key)));
   if (existingIndex === -1) return [...current, next];
-  return current.map((entry, index) => (index === existingIndex ? { ...entry, ...next } : entry));
+  return current.map((entry, index) => (index === existingIndex ? {
+    ...entry,
+    ...next,
+    localId: entry.localId,
+    createdAt: entry.createdAt,
+    queueTaskId: entry.queueTaskId ?? next.queueTaskId,
+    queueRunIds: [...entry.queueRunIds, ...next.queueRunIds].filter((runId, runIndex, allRunIds) => allRunIds.indexOf(runId) === runIndex),
+    clientMessageId: entry.clientMessageId ?? next.clientMessageId,
+  } : entry));
 }
 
 function queueItemForChat(entry: QueuedChatEntry, items: QueueDisplayItem[]): QueueDisplayItem | undefined {
@@ -315,11 +351,26 @@ function nearTimestamp(left?: string, right?: string): boolean {
   const leftTime = Date.parse(left ?? '');
   const rightTime = Date.parse(right ?? '');
   if (!Number.isFinite(leftTime) || !Number.isFinite(rightTime)) return false;
-  return Math.abs(leftTime - rightTime) <= 5000;
+  return Math.abs(leftTime - rightTime) <= 15000;
 }
 
 function isQueueBacked(entry: VisibleQueuedChatEntry): boolean {
   return Boolean(entry.item || entry.queueTaskId || entry.queueRunIds.length > 0);
+}
+
+function recipientsMatch(left: string, right: string): boolean {
+  const normalize = (value: string) => (value === '*' ? 'team' : value);
+  return normalize(left) === normalize(right);
+}
+
+function userMessageMatchesQueuedChat(message: TeamMessageSummary, queued: VisibleQueuedChatTimelineEntry): boolean {
+  if (!isUserMessage(message)) return false;
+  const messageKeys = queuedChatMessageKeys(message);
+  const queuedKeys = queuedChatEntryKeys(queued.entry).concat(queued.entry.item ? queuedChatItemKeys(queued.entry.item) : []);
+  if (messageKeys.some((key) => queuedKeys.includes(key))) return true;
+  return message.text === queued.entry.text
+    && recipientsMatch(message.to, queued.entry.to)
+    && nearTimestamp(message.createdAt, queued.entry.createdAt);
 }
 
 function isUserMessage(msg: TeamMessageSummary): boolean {
@@ -355,10 +406,10 @@ function newClientMessageId(): string {
   return `client-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-function queueAssistantMessage(item: QueueDisplayItem | undefined): TeamMessageSummary | null {
+function queueAssistantMessage(item: QueueDisplayItem | undefined, parentKey: string): TeamMessageSummary | null {
   if (!item?.assistantText?.trim()) return null;
   return {
-    id: `queued-assistant-${item.primaryRunId ?? item.runId ?? item.queueRunIds?.[0] ?? item.id}`,
+    id: `queued-assistant-${parentKey}`,
     from: item.assistantFrom ?? item.currentMember ?? 'Lead',
     fromTool: item.assistantProvider,
     to: 'user',
@@ -501,15 +552,10 @@ export function TeamChatRoute() {
   };
 
   const { pullHandlers, PullIndicator } = usePullRefresh(refresh);
-  const visibleQueuedChats = useMemo(() => {
-    const persistedUserMessages = new Set(
-      messages
-        .filter((message) => isUserMessage(message))
-        .map((message) => `${message.to}:${message.text}`),
-    );
+  const visibleQueuedChats = useMemo<VisibleQueuedChatTimelineEntry[]>(() => {
     const byKey = new Map<string, VisibleQueuedChatEntry>();
     const aliases = new Map<string, string>();
-    const deletedIds = new Set(deletedQueuedChats.map((entry) => entry.id));
+    const deletedIds = deletedQueueItemIds(deletedQueuedChats);
 
     const upsertEntry = (entry: VisibleQueuedChatEntry, item?: QueueDisplayItem) => {
       const keys = [
@@ -519,7 +565,26 @@ export function TeamChatRoute() {
       const existingKey = keys.map((key) => aliases.get(key) ?? key).find((key) => byKey.has(key));
       const canonicalKey = existingKey ?? queuedChatCanonicalKey(entry, item);
       const existingEntry = byKey.get(canonicalKey);
-      const nextEntry = existingEntry ? { ...existingEntry, ...entry, item: item ?? entry.item ?? existingEntry.item } : { ...entry, item: item ?? entry.item };
+      const nextEntry = existingEntry ? {
+        ...existingEntry,
+        ...entry,
+        localId: existingEntry.localId,
+        text: existingEntry.text || entry.text,
+        to: existingEntry.to || entry.to,
+        createdAt: existingEntry.createdAt,
+        queueTaskId: existingEntry.queueTaskId ?? entry.queueTaskId ?? item?.queueTaskId ?? item?.linkedQueueTaskId,
+        queueRunIds: [
+          ...existingEntry.queueRunIds,
+          ...entry.queueRunIds,
+          ...(item?.queueRunIds ?? []),
+          ...(item?.runIds ?? []),
+          item?.runId,
+          item?.primaryRunId,
+        ].filter((runId, runIndex, allRunIds): runId is string => Boolean(runId) && allRunIds.indexOf(runId) === runIndex),
+        clientMessageId: existingEntry.clientMessageId ?? entry.clientMessageId ?? item?.clientMessageId,
+        deleted: existingEntry.deleted || entry.deleted,
+        item: item ?? entry.item ?? existingEntry.item,
+      } : { ...entry, item: item ?? entry.item };
       byKey.set(canonicalKey, nextEntry);
       for (const key of keys) aliases.set(key, canonicalKey);
     };
@@ -542,9 +607,10 @@ export function TeamChatRoute() {
     }
 
     const entries = Array.from(byKey.entries()).map(([key, entry]) => ({
-        ...entry,
-        deleted: entry.deleted ?? deletedIds.has(key),
-      }));
+      key,
+      ...entry,
+      deleted: entry.deleted ?? deletedIds.has(key),
+    }));
     const queueBackedEntries = entries.filter(isQueueBacked);
     const dedupedEntries = entries.filter((entry) => {
       if (isQueueBacked(entry) || entry.clientMessageId || entry.queueTaskId || entry.queueRunIds.length > 0) return true;
@@ -555,10 +621,10 @@ export function TeamChatRoute() {
     });
 
     return dedupedEntries.sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt)).map((entry) => ({
+      key: entry.key,
       entry,
-      showBubble: !persistedUserMessages.has(`${entry.to}:${entry.text}`),
     }));
-  }, [messages, queuedChats, queueItems, deletedQueuedChats]);
+  }, [queuedChats, queueItems, deletedQueuedChats]);
 
   const deletedQueuedChatTexts = useMemo(() => new Set(
     visibleQueuedChats
@@ -567,8 +633,11 @@ export function TeamChatRoute() {
   ), [visibleQueuedChats]);
 
   const displayedMessages = useMemo(() => (
-    messages.filter((message) => !(isUserMessage(message) && deletedQueuedChatTexts.has(message.text)))
-  ), [messages, deletedQueuedChatTexts]);
+    messages.filter((message) => {
+      if (isUserMessage(message) && deletedQueuedChatTexts.has(message.text)) return false;
+      return !visibleQueuedChats.some((queued) => userMessageMatchesQueuedChat(message, queued));
+    })
+  ), [messages, deletedQueuedChatTexts, visibleQueuedChats]);
 
   const assistantMessagesFromQueue = useMemo(() => {
     const persistedAssistantMessages = new Set(
@@ -577,7 +646,7 @@ export function TeamChatRoute() {
         .map((message) => `${message.from}:${message.text}`),
     );
     return visibleQueuedChats
-      .map(({ entry }) => queueAssistantMessage(entry.item ?? queueItemForChat(entry, queueItems)))
+      .map(({ key, entry }) => queueAssistantMessage(entry.item ?? queueItemForChat(entry, queueItems), key))
       .filter((message): message is TeamMessageSummary => Boolean(message))
       .filter((message) => !persistedAssistantMessages.has(`${message.from}:${message.text}`));
   }, [messages, queueItems, visibleQueuedChats]);
@@ -591,7 +660,7 @@ export function TeamChatRoute() {
     }));
     const queuedEntries = visibleQueuedChats.map((queued) => ({
       type: 'queued' as const,
-      id: queued.entry.localId,
+      id: queued.key,
       createdAt: queued.entry.createdAt,
       queued,
     }));
@@ -716,7 +785,7 @@ export function TeamChatRoute() {
 
         {timelineEntries.map((timelineEntry) => {
           if (timelineEntry.type === 'queued') {
-            const { entry, showBubble } = timelineEntry.queued;
+            const { entry } = timelineEntry.queued;
             const item = entry.item ?? queueItemForChat(entry, queueItems);
             const status = queueStatusLabel(entry, item, entry.deleted);
             const canDelete = !entry.deleted && isCancelledQueueStatus(status);
@@ -727,7 +796,7 @@ export function TeamChatRoute() {
                   <div className="max-w-[92%] rounded-[14px] border border-border bg-surface px-3 py-2 text-[13px] tracking-[-0.13px] text-text-dim">
                     Message deleted
                   </div>
-                ) : showBubble && (
+                ) : (
                   <ChatBubble
                     role="user"
                     tool="user"

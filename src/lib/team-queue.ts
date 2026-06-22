@@ -408,6 +408,8 @@ function normalizeItem(
   const title = displayTitle(value, description, id, kind, parentQueueTask);
   const metadata = isRecord(value.metadata) ? value.metadata : undefined;
   const queuedChatResult = readNestedRecord(value, ['queuedChatResult', 'queued_chat_result']);
+  const sourceRef = readNestedRecord(value, ['sourceRef', 'source_ref'])
+    ?? (parentQueueTask ? readNestedRecord(parentQueueTask, ['sourceRef', 'source_ref']) : undefined);
   const linkedQueueTaskId = readNestedText(value, ['taskId', 'task_id', 'queueTaskId', 'queue_task_id'])
     ?? (parentQueueTask ? readText(parentQueueTask, ['id', 'taskId', 'task_id', 'queueTaskId', 'queue_task_id']) : undefined);
   const linkedQueueTaskRef = linkedQueueTaskId ? queueTaskBoardRefs.get(linkedQueueTaskId) : undefined;
@@ -443,7 +445,8 @@ function normalizeItem(
     runId: kind === 'run' ? id : undefined,
     queueTaskId: kind === 'task' ? id : linkedQueueTaskId,
     queueRunIds: queueRunIds.length > 0 ? queueRunIds : undefined,
-    clientMessageId: readNestedText(value, ['clientMessageId', 'client_message_id', 'messageId', 'message_id']),
+    clientMessageId: readNestedText(value, ['clientMessageId', 'client_message_id', 'messageId', 'message_id'])
+      ?? (sourceRef ? readText(sourceRef, ['clientMessageId', 'client_message_id', 'messageId', 'message_id']) : undefined),
     assistantText: readableText(queuedChatResult, ['assistantText', 'assistant_text'])
       ?? readableText(value, ['assistantText', 'assistant_text'], true),
     assistantFrom: readableText(queuedChatResult, ['memberName', 'member_name', 'from'])
